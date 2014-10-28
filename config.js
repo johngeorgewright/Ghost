@@ -27,7 +27,7 @@ config = {
             connection: process.env.DATABASE_URL,
             debug: false
         },
-
+        fileStorage: false,
         server: {
             // Host to be passed to node's `net.Server#listen()`
             host: '0.0.0.0',
