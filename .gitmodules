@@ -3,4 +3,4 @@
 	url = https://github.com/TryGhost/Casper.git
 [submodule "content/themes/jasper"]
 	path = content/themes/jasper
-	url = git@github.com:johngeorgewright/Ghost-Theme-Jasper.git
+	url = https://github.com/johngeorgewright/Ghost-Theme-Jasper.git
