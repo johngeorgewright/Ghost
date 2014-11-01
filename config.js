@@ -13,12 +13,11 @@ config = {
         url: 'http://blog.j-g-w.info',
         mail: {
           transport: 'SMTP',
-          host: 'smtp.mandrillapp.com',
           options: {
-            service: 'Mandrill',
+            service: 'Mailgun',
             auth: {
-              user: process.env.MANDRILL_USERNAME,
-              pass: process.env.MNADRILL_APIKEY
+              user: process.env.MAILGUN_USERNAME,
+              pass: process.env.MAILGUN_APIKEY
             }
           }
         },
