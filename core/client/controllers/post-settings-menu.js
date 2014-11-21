@@ -2,9 +2,10 @@
 import {parseDateString, formatDate} from 'ghost/utils/date-formatting';
 import SlugGenerator from 'ghost/models/slug-generator';
 import boundOneWay from 'ghost/utils/bound-one-way';
+import isNumber from 'ghost/utils/isNumber';
 
 var PostSettingsMenuController = Ember.ObjectController.extend({
-    //State for if the user is viewing a tab's pane.
+    // State for if the user is viewing a tab's pane.
     needs: 'application',
 
     lastPromise: null,
@@ -17,8 +18,10 @@ var PostSettingsMenuController = Ember.ObjectController.extend({
         if (arguments.length > 1) {
             return value;
         }
+
         return false;
     }),
+
     selectedAuthor: null,
     initializeSelectedAuthor: function () {
         var self = this;
@@ -34,13 +37,15 @@ var PostSettingsMenuController = Ember.ObjectController.extend({
             selectedAuthor = this.get('selectedAuthor'),
             model = this.get('model'),
             self = this;
-        //return if nothing changed
+
+        // return if nothing changed
         if (selectedAuthor.get('id') === author.get('id')) {
             return;
         }
+
         model.set('author', selectedAuthor);
 
-        //if this is a new post (never been saved before), don't try to save it
+        // if this is a new post (never been saved before), don't try to save it
         if (this.get('isNew')) {
             return;
         }
@@ -51,8 +56,9 @@ var PostSettingsMenuController = Ember.ObjectController.extend({
             model.rollback();
         });
     }.observes('selectedAuthor'),
+
     authors: Ember.computed(function () {
-        //Loaded asynchronously, so must use promise proxies.
+        // Loaded asynchronously, so must use promise proxies.
         var deferred = {};
 
         deferred.promise = this.store.find('user', {limit: 'all'}).then(function (users) {
@@ -67,28 +73,28 @@ var PostSettingsMenuController = Ember.ObjectController.extend({
             .extend(Ember.PromiseProxyMixin)
             .create(deferred);
     }),
-    /**
-     * The placeholder is the published date of the post,
-     * or the current date if the pubdate has not been set.
-     */
-    publishedAtPlaceholder: Ember.computed('publishedAtValue', function () {
+
+    publishedAtValue: Ember.computed('published_at', function () {
         var pubDate = this.get('published_at');
+
         if (pubDate) {
             return formatDate(pubDate);
         }
+
         return formatDate(moment());
     }),
-    publishedAtValue: boundOneWay('published_at', formatDate),
 
     slugValue: boundOneWay('slug'),
-    //Lazy load the slug generator for slugPlaceholder
+
+    // Lazy load the slug generator
     slugGenerator: Ember.computed(function () {
         return SlugGenerator.create({
             ghostPaths: this.get('ghostPaths'),
             slugType: 'post'
         });
     }),
-    //Requests slug from title
+
+    // Requests slug from title
     generateAndSetSlug: function (destination) {
         var self = this,
             title = this.get('titleScratch'),
@@ -138,16 +144,18 @@ var PostSettingsMenuController = Ember.ObjectController.extend({
             el = $('.rendered-markdown');
 
             // Get rendered markdown
-            if (!_.isUndefined(el) && el.length > 0) {
+            if (el !== undefined && el.length > 0) {
                 html = el.clone();
-                html.find('.image-uploader').remove();
+                html.find('.js-drop-zone').remove();
                 html = html[0].innerHTML;
             }
 
             // Strip HTML
-            placeholder = $('<div />', { html: html }).text();
+            placeholder = $('<div />', {html: html}).text();
             // Replace new lines and trim
+            // jscs: disable
             placeholder = placeholder.replace(/\n+/g, ' ').trim();
+            // jscs: enable
         }
 
         if (placeholder.length > 156) {
@@ -160,10 +168,15 @@ var PostSettingsMenuController = Ember.ObjectController.extend({
         return placeholder;
     }),
 
-    seoURL: Ember.computed('slug', 'slugPlaceholder', function () {
+    seoURL: Ember.computed('slug', function () {
         var blogUrl = this.get('config').blogUrl,
-            seoSlug = this.get('slug') ? this.get('slug') : this.get('slugPlaceholder'),
-            seoURL = blogUrl + '/' + seoSlug + '/';
+            seoSlug = this.get('slug') ? this.get('slug') : '',
+            seoURL = blogUrl + '/' + seoSlug;
+
+        // only append a slash to the URL if the slug exists
+        if (seoSlug) {
+            seoURL += '/';
+        }
 
         if (seoURL.length > 70) {
             seoURL = seoURL.substring(0, 70).trim();
@@ -180,41 +193,29 @@ var PostSettingsMenuController = Ember.ObjectController.extend({
             this.addObserver('titleScratch', this, 'titleObserver');
         }
     }.observes('model'),
-    titleObserver: function () {
-        var debounceId;
 
-        if (this.get('isNew') && !this.get('title')) {
-            debounceId = Ember.run.debounce(this, 'generateAndSetSlug', ['slugPlaceholder'], 700);
-        } else if (this.get('title') === '(Untitled)') {
+    titleObserver: function () {
+        var debounceId,
+            title = this.get('title');
+
+        // generate a slug if a post is new and doesn't have a title yet or
+        // if the title is still '(Untitled)' and the slug is unaltered.
+        if ((this.get('isNew') && !title) || title === '(Untitled)') {
             debounceId = Ember.run.debounce(this, 'generateAndSetSlug', ['slug'], 700);
         }
 
         this.set('debounceId', debounceId);
     },
-    slugPlaceholder: Ember.computed(function (key, value) {
-        var slug = this.get('slug');
-
-        //If the post has a slug, that's its placeholder.
-        if (slug) {
-            return slug;
-        }
-
-        //Otherwise, it's whatever value was set by the
-        //  slugGenerator (below)
-        if (arguments.length > 1) {
-            return value;
-        }
-        //The title will stand in until the actual slug has been generated
-        return this.get('titleScratch');
-    }),
 
     showErrors: function (errors) {
         errors = Ember.isArray(errors) ? errors : [errors];
         this.notifications.showErrors(errors);
     },
+
     showSuccess: function (message) {
         this.notifications.showSuccess(message);
     },
+
     actions: {
         togglePage: function () {
             var self = this;
@@ -236,6 +237,7 @@ var PostSettingsMenuController = Ember.ObjectController.extend({
             var self = this;
 
             this.toggleProperty('featured');
+
             // If this is a new post.  Don't save the model.  Defer the save
             // to the user pressing the save button
             if (this.get('isNew')) {
@@ -247,6 +249,7 @@ var PostSettingsMenuController = Ember.ObjectController.extend({
                 self.get('model').rollback();
             });
         },
+
         /**
          * triggered by user manually changing slug
          */
@@ -285,7 +288,7 @@ var PostSettingsMenuController = Ember.ObjectController.extend({
 
                 // if the candidate slug is the same as the existing slug except
                 // for the incrementor then the existing slug should be used
-                if (_.isNumber(check) && check > 0) {
+                if (isNumber(check) && check > 0) {
                     if (slug === slugTokens.join('-') && serverSlug !== newSlug) {
                         self.set('slugValue', slug);
 
@@ -324,10 +327,11 @@ var PostSettingsMenuController = Ember.ObjectController.extend({
                 self = this;
 
             if (!userInput) {
-                //Clear out the published_at field for a draft
+                // Clear out the published_at field for a draft
                 if (this.get('isDraft')) {
                     this.set('published_at', null);
                 }
+
                 return;
             }
 
@@ -340,9 +344,10 @@ var PostSettingsMenuController = Ember.ObjectController.extend({
                 errMessage = 'Published Date cannot currently be in the future.';
             }
 
-            //If errors, notify and exit.
+            // If errors, notify and exit.
             if (errMessage) {
                 this.showErrors(errMessage);
+
                 return;
             }
 
@@ -351,7 +356,7 @@ var PostSettingsMenuController = Ember.ObjectController.extend({
                 return;
             }
 
-            //Validation complete
+            // Validation complete
             this.set('published_at', newPublishedAt);
 
             // If this is a new post.  Don't save the model.  Defer the save

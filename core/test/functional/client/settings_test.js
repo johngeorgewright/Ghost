@@ -52,7 +52,7 @@ CasperTest.begin('General settings pane is correct', 8, function suite(test) {
 
     function assertImageUploaderModalThenClose() {
         test.assertSelectorHasText('.description', 'Add image');
-        casper.click('#modal-container .js-button-accept');
+        casper.click('.modal-container .js-button-accept');
         casper.waitForSelector('.notification-success', function onSuccess() {
             test.assert(true, 'Got success notification');
         }, casper.failOnTimeout(test, 'No success notification'));
@@ -65,7 +65,7 @@ CasperTest.begin('General settings pane is correct', 8, function suite(test) {
         casper.click('.js-modal-logo');
     });
 
-    casper.waitForSelector('#modal-container .modal-content .js-drop-zone .description',
+    casper.waitForSelector('.modal-container .modal-content .js-drop-zone .description',
         assertImageUploaderModalThenClose, casper.failOnTimeout(test, 'No upload logo modal container appeared'));
 
     // Test Blog Cover Upload Button
@@ -73,7 +73,7 @@ CasperTest.begin('General settings pane is correct', 8, function suite(test) {
         casper.click('.js-modal-cover');
     });
 
-    casper.waitForSelector('#modal-container .modal-content .js-drop-zone .description',
+    casper.waitForSelector('.modal-container .modal-content .js-drop-zone .description',
         assertImageUploaderModalThenClose, casper.failOnTimeout(test, 'No upload cover modal container appeared'));
 
     function handleSettingsRequest(requestData) {
@@ -277,9 +277,13 @@ CasperTest.begin('User settings screen resets all whitespace slug to original va
         test.assertUrlMatch(/ghost\/settings\/users\/test\/$/, 'Ghost doesn\'t require login this time');
     });
 
-    casper.then(function setSlugToAllWhitespace() {
-        slug = casper.getElementInfo('#user-slug').attributes.value;
+    casper.then(function getSlugValue() {
+        slug = this.evaluate(function () {
+            return document.querySelector('#user-slug').value;
+        });
+    });
 
+    casper.then(function changeSlugInput() {
         casper.fillSelectors('.user-profile', {
             '#user-slug': '   '
         }, false);
@@ -301,9 +305,13 @@ CasperTest.begin('User settings screen change slug handles duplicate slug', 4, f
         test.assertUrlMatch(/ghost\/settings\/users\/test\/$/, 'Ghost doesn\'t require login this time');
     });
 
-    casper.then(function changeSlug() {
-        slug = casper.getElementInfo('#user-slug').attributes.value;
+    casper.then(function getSlugValue() {
+        slug = this.evaluate(function () {
+            return document.querySelector('#user-slug').value;
+        });
+    });
 
+    casper.then(function changeSlug() {
         casper.fillSelectors('.user-profile', {
             '#user-slug': slug + '!'
         }, false);
@@ -321,16 +329,21 @@ CasperTest.begin('User settings screen change slug handles duplicate slug', 4, f
 });
 
 CasperTest.begin('User settings screen validates email', 6, function suite(test) {
-    var email, brokenEmail;
+    var email;
 
     casper.thenOpenAndWaitForPageLoad('settings.users.user', function testTitleAndUrl() {
         test.assertTitle('Ghost Admin', 'Ghost admin has no title');
         test.assertUrlMatch(/ghost\/settings\/users\/test\/$/, 'Ghost doesn\'t require login this time');
     });
 
+    casper.then(function getEmail() {
+        email = this.evaluate(function () {
+            return document.querySelector('#user-email').value;
+        });
+    });
+
     casper.then(function setEmailToInvalid() {
-        email = casper.getElementInfo('#user-email').attributes.value;
-        brokenEmail = email.replace('.', '-');
+        var brokenEmail = email.replace('.', '-');
 
         casper.fillSelectors('.user-profile', {
             '#user-email': brokenEmail
