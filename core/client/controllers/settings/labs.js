@@ -1,4 +1,4 @@
-var DebugController = Ember.Controller.extend(Ember.Evented, {
+var LabsController = Ember.Controller.extend(Ember.Evented, {
     uploadButtonText: 'Import',
     importErrors: '',
 
@@ -8,6 +8,7 @@ var DebugController = Ember.Controller.extend(Ember.Evented, {
                 formData = new FormData();
 
             this.set('uploadButtonText', 'Importing');
+            this.set('importErrors', '');
             this.notifications.closePassive();
 
             formData.append('importfile', file);
@@ -63,4 +64,4 @@ var DebugController = Ember.Controller.extend(Ember.Evented, {
     }
 });
 
-export default DebugController;
+export default LabsController;

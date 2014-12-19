@@ -116,6 +116,12 @@ EditorControllerMixin = Ember.Mixin.create(MarkerManager, {
             return true;
         }
 
+        // if the Adapter failed to save the model isError will be true
+        // and we should consider the model still dirty.
+        if (model.get('isError')) {
+            return true;
+        }
+
         // models created on the client always return `isDirty: true`,
         // so we need to see which properties have actually changed.
         if (model.get('isNew')) {
@@ -176,15 +182,20 @@ EditorControllerMixin = Ember.Mixin.create(MarkerManager, {
     },
 
     showSaveNotification: function (prevStatus, status, delay) {
-        var message = this.messageMap.success.post[prevStatus][status];
+        var message = this.messageMap.success.post[prevStatus][status],
+            path = this.get('ghostPaths.url').join(this.get('config.blogUrl'), this.get('url'));
 
+        if (status === 'published') {
+            message += '&nbsp;<a href="' + path + '">View Post</a>';
+        }
         this.notifications.showSuccess(message, {delayed: delay});
     },
 
     showErrorNotification: function (prevStatus, status, errors, delay) {
-        var message = this.messageMap.errors.post[prevStatus][status];
+        var message = this.messageMap.errors.post[prevStatus][status],
+            error = (errors && errors[0] && errors[0].message) || 'Unknown Error';
 
-        message += '<br />' + errors[0].message;
+        message += '<br />' + error;
 
         this.notifications.showError(message, {delayed: delay});
     },
@@ -226,7 +237,7 @@ EditorControllerMixin = Ember.Mixin.create(MarkerManager, {
             this.set('status', status);
 
             // Set a default title
-            if (!this.get('titleScratch')) {
+            if (!this.get('titleScratch').trim()) {
                 this.set('titleScratch', '(Untitled)');
             }
 
@@ -257,7 +268,7 @@ EditorControllerMixin = Ember.Mixin.create(MarkerManager, {
 
                 self.set('status', prevStatus);
 
-                return Ember.RSVP.reject(errors);
+                return self.get('model');
             });
 
             psmController.set('lastPromise', promise);

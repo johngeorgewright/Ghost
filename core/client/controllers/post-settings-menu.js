@@ -109,6 +109,10 @@ var PostSettingsMenuController = Ember.ObjectController.extend({
         promise = Ember.RSVP.resolve(afterSave).then(function () {
             return self.get('slugGenerator').generateSlug(title).then(function (slug) {
                 self.set(destination, slug);
+            }).catch(function () {
+                // Nothing to do (would be nice to log this somewhere though),
+                // but a rejected promise needs to be handled here so that a resolved
+                // promise is returned.
             });
         });
 
@@ -451,6 +455,14 @@ var PostSettingsMenuController = Ember.ObjectController.extend({
 
         closeSubview: function () {
             this.set('isViewingSubview', false);
+        },
+
+        resetUploader: function () {
+            var uploader = this.get('uploaderReference');
+
+            if (uploader && uploader[0]) {
+                uploader[0].uploaderUi.reset();
+            }
         }
     }
 });
