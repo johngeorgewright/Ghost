@@ -1,10 +1,20 @@
 define("ghost/adapters/application", 
+  ["ghost/adapters/embedded-relation-adapter","exports"],
+  function(__dependency1__, __exports__) {
+    "use strict";
+    var EmbeddedRelationAdapter = __dependency1__["default"];
+
+    var ApplicationAdapter = EmbeddedRelationAdapter.extend();
+
+    __exports__["default"] = ApplicationAdapter;
+  });
+define("ghost/adapters/base", 
   ["ghost/utils/ghost-paths","exports"],
   function(__dependency1__, __exports__) {
     "use strict";
     var ghostPaths = __dependency1__["default"];
 
-    var ApplicationAdapter = DS.RESTAdapter.extend({
+    var BaseAdapter = DS.RESTAdapter.extend({
         host: window.location.origin,
         namespace: ghostPaths().apiRoot.slice(1),
 
@@ -45,25 +55,27 @@ define("ghost/adapters/application",
         }
     });
 
-    __exports__["default"] = ApplicationAdapter;
+    __exports__["default"] = BaseAdapter;
   });
 define("ghost/adapters/embedded-relation-adapter", 
-  ["ghost/adapters/application","exports"],
+  ["ghost/adapters/base","exports"],
   function(__dependency1__, __exports__) {
     "use strict";
-    var ApplicationAdapter = __dependency1__["default"];
+    var BaseAdapter = __dependency1__["default"];
 
     // EmbeddedRelationAdapter will augment the query object in calls made to
     // DS.Store#find, findQuery, and findAll with the correct "includes"
     // (?include=relatedType) by introspecting on the provided subclass of the DS.Model.
+    // In cases where there is no query object (DS.Model#save, or simple finds) the URL
+    // that is built will be augmented with ?include=... where appropriate.
     //
     // Example:
     // If a model has an embedded hasMany relation, the related type will be included:
     // roles: DS.hasMany('role', { embedded: 'always' }) => ?include=roles
 
-    var EmbeddedRelationAdapter = ApplicationAdapter.extend({
+    var EmbeddedRelationAdapter = BaseAdapter.extend({
         find: function (store, type, id) {
-            return this.findQuery(store, type, this.buildQuery(store, type, id));
+            return this.ajax(this.buildIncludeURL(store, type, id), 'GET');
         },
 
         findQuery: function (store, type, query) {
@@ -71,31 +83,66 @@ define("ghost/adapters/embedded-relation-adapter",
         },
 
         findAll: function (store, type, sinceToken) {
-            return this.findQuery(store, type, this.buildQuery(store, type, sinceToken));
+            var query = {};
+
+            if (sinceToken) {
+                query.since = sinceToken;
+            }
+
+            return this.findQuery(store, type, query);
+        },
+
+        createRecord: function (store, type, record) {
+            return this.saveRecord(store, type, record, {method: 'POST'});
+        },
+
+        updateRecord: function (store, type, record) {
+            var options = {
+                method: 'PUT',
+                id: Ember.get(record, 'id')
+            };
+
+            return this.saveRecord(store, type, record, options);
+        },
+
+        saveRecord: function (store, type, record, options) {
+            options = options || {};
+
+            var url = this.buildIncludeURL(store, type, options.id),
+                payload = this.preparePayload(store, type, record);
+
+            return this.ajax(url, options.method, payload);
+        },
+
+        preparePayload: function (store, type, record) {
+            var serializer = store.serializerFor(type.typeKey),
+                payload = {};
+
+            serializer.serializeIntoHash(payload, type, record);
+
+            return {data: payload};
+        },
+
+        buildIncludeURL: function (store, type, id) {
+            var url = this.buildURL(type.typeKey, id),
+                includes = this.getEmbeddedRelations(store, type);
+
+            if (includes.length) {
+                url += '?include=' + includes.join(',');
+            }
+
+            return url;
         },
 
         buildQuery: function (store, type, options) {
-            var model,
-                toInclude = [],
-                query = {},
+            var toInclude = this.getEmbeddedRelations(store, type),
+                query = options || {},
                 deDupe = {};
-
-            // Get the class responsible for creating records of this type
-            model = store.modelFor(type);
-
-            // Iterate through the model's relationships and build a list
-            // of those that need to be pulled in via "include" from the API
-            model.eachRelationship(function (name, meta) {
-                if (meta.kind === 'hasMany' &&
-                    Object.prototype.hasOwnProperty.call(meta.options, 'embedded') &&
-                    meta.options.embedded === 'always') {
-                    toInclude.push(name);
-                }
-            });
 
             if (toInclude.length) {
                 // If this is a find by id, build a query object and attach the includes
                 if (typeof options === 'string' || typeof options === 'number') {
+                    query = {};
                     query.id = options;
                     query.include = toInclude.join(',');
                 } else if (typeof options === 'object' || Ember.isNone(options)) {
@@ -103,7 +150,7 @@ define("ghost/adapters/embedded-relation-adapter",
                     // the includes.
                     // If this is a find with an existing query object then merge the includes
                     // into the existing object. Existing properties and includes are preserved.
-                    query = options || query;
+                    query = query || {};
                     toInclude = toInclude.concat(query.include ? query.include.split(',') : []);
 
                     toInclude.forEach(function (include) {
@@ -115,52 +162,27 @@ define("ghost/adapters/embedded-relation-adapter",
             }
 
             return query;
+        },
+
+        getEmbeddedRelations: function (store, type) {
+            var model = store.modelFor(type),
+                ret = [];
+
+            // Iterate through the model's relationships and build a list
+            // of those that need to be pulled in via "include" from the API
+            model.eachRelationship(function (name, meta) {
+                if (meta.kind === 'hasMany' &&
+                    Object.prototype.hasOwnProperty.call(meta.options, 'embedded') &&
+                    meta.options.embedded === 'always') {
+                    ret.push(name);
+                }
+            });
+
+            return ret;
         }
     });
 
     __exports__["default"] = EmbeddedRelationAdapter;
-  });
-define("ghost/adapters/post", 
-  ["ghost/adapters/embedded-relation-adapter","exports"],
-  function(__dependency1__, __exports__) {
-    "use strict";
-    var EmbeddedRelationAdapter = __dependency1__["default"];
-
-    var PostAdapter = EmbeddedRelationAdapter.extend({
-        createRecord: function (store, type, record) {
-            var data = {},
-                serializer = store.serializerFor(type.typeKey),
-                url = this.buildURL(type.typeKey);
-
-            // make the server return with the tags embedded
-            url = url + '?include=tags';
-
-            // use the PostSerializer to transform the model back into
-            // an array with a post object like the API expects
-            serializer.serializeIntoHash(data, type, record);
-
-            return this.ajax(url, 'POST', {data: data});
-        },
-
-        updateRecord: function (store, type, record) {
-            var data = {},
-                serializer = store.serializerFor(type.typeKey),
-                id = Ember.get(record, 'id'),
-                url = this.buildURL(type.typeKey, id);
-
-            // make the server return with the tags embedded
-            url = url + '?include=tags';
-
-            // use the PostSerializer to transform the model back into
-            // an array of posts objects like the API expects
-            serializer.serializeIntoHash(data, type, record);
-
-            // use the ApplicationAdapter's buildURL method
-            return this.ajax(url, 'PUT', {data: data});
-        }
-    });
-
-    __exports__["default"] = PostAdapter;
   });
 define("ghost/adapters/setting", 
   ["ghost/adapters/application","exports"],
@@ -189,76 +211,38 @@ define("ghost/adapters/setting",
     __exports__["default"] = SettingAdapter;
   });
 define("ghost/adapters/user", 
-  ["ghost/adapters/embedded-relation-adapter","exports"],
+  ["ghost/adapters/application","exports"],
   function(__dependency1__, __exports__) {
     "use strict";
-    var EmbeddedRelationAdapter = __dependency1__["default"];
+    var ApplicationAdapter = __dependency1__["default"];
 
-    var UserAdapter = EmbeddedRelationAdapter.extend({
-        createRecord: function (store, type, record) {
-            var data = {},
-                serializer = store.serializerFor(type.typeKey),
-                url = this.buildURL(type.typeKey);
-
-            // Ask the API to include full role objects in its response
-            url += '?include=roles';
-
-            // Use the UserSerializer to transform the model back into
-            // an array of user objects like the API expects
-            serializer.serializeIntoHash(data, type, record);
-
-            // Use the url from the ApplicationAdapter's buildURL method
-            return this.ajax(url, 'POST', {data: data});
-        },
-
-        updateRecord: function (store, type, record) {
-            var data = {},
-                serializer = store.serializerFor(type.typeKey),
-                id = Ember.get(record, 'id'),
-                url = this.buildURL(type.typeKey, id);
-
-            // Ask the API to include full role objects in its response
-            url += '?include=roles';
-
-            // Use the UserSerializer to transform the model back into
-            // an array of user objects like the API expects
-            serializer.serializeIntoHash(data, type, record);
-
-            // Use the url from the ApplicationAdapter's buildURL method
-            return this.ajax(url, 'PUT', {data: data});
-        },
-
+    var UserAdapter = ApplicationAdapter.extend({
         find: function (store, type, id) {
-            var url = this.buildQuery(store, type, id);
-            url.status = 'all';
-            return this.findQuery(store, type, url);
+            return this.findQuery(store, type, {id: id, status: 'all'});
         }
     });
 
     __exports__["default"] = UserAdapter;
   });
 define("ghost/app", 
-  ["ember/resolver","ember/load-initializers","ghost/utils/link-view","ghost/utils/text-field","ghost/config","ghost/helpers/ghost-paths","exports"],
-  function(__dependency1__, __dependency2__, __dependency3__, __dependency4__, __dependency5__, __dependency6__, __exports__) {
+  ["ember/resolver","ember/load-initializers","ghost/utils/link-view","ghost/utils/text-field","ghost/config","exports"],
+  function(__dependency1__, __dependency2__, __dependency3__, __dependency4__, __dependency5__, __exports__) {
     "use strict";
     var Resolver = __dependency1__["default"];
     var loadInitializers = __dependency2__["default"];
     var configureApp = __dependency5__["default"];
-    var ghostPathsHelper = __dependency6__["default"];
 
     Ember.MODEL_FACTORY_INJECTIONS = true;
 
     var App = Ember.Application.extend({
         modulePrefix: 'ghost',
-        Resolver: Resolver['default']
+        Resolver: Resolver.default
     });
 
     // Runtime configuration of Ember.Application
     configureApp(App);
 
     loadInitializers(App, 'ghost');
-
-    Ember.Handlebars.registerHelper('gh-path', ghostPathsHelper);
 
     __exports__["default"] = App;
   });
@@ -793,6 +777,8 @@ define("ghost/components/gh-dropdown-button",
 
     var DropdownButton = Ember.Component.extend(DropdownMixin, {
         tagName: 'button',
+        attributeBindings: 'role',
+        role: 'button',
 
         // matches with the dropdown this button toggles
         dropdownName: null,
@@ -1012,21 +998,23 @@ define("ghost/components/gh-modal-dialog",
     "use strict";
     var ModalDialog = Ember.Component.extend({
         didInsertElement: function () {
-            this.$('.js-modal-container').fadeIn(50);
-
-            this.$('.js-modal-background').show().fadeIn(10, function () {
-                $(this).addClass('in');
-            });
-
-            this.$('.js-modal').addClass('in');
+            this.$('.js-modal-container, .js-modal-background').addClass('fade-in open');
+            this.$('.js-modal').addClass('open');
         },
 
-        willDestroyElement: function () {
-            this.$('.js-modal').removeClass('in');
+        close: function () {
+            var self = this;
 
-            this.$('.js-modal-background').removeClass('in');
+            this.$('.js-modal, .js-modal-background').removeClass('fade-in').addClass('fade-out');
 
-            return this._super();
+            // The background should always be the last thing to fade out, so check on that instead of the content
+            this.$('.js-modal-background').on('animationend webkitAnimationEnd oanimationend MSAnimationEnd', function (event) {
+                if (event.originalEvent.animationName === 'fade-out') {
+                    self.$('.js-modal, .js-modal-background').removeClass('open');
+                }
+            });
+
+            this.sendAction();
         },
 
         confirmaccept: 'confirmAccept',
@@ -1034,15 +1022,16 @@ define("ghost/components/gh-modal-dialog",
 
         actions: {
             closeModal: function () {
-                this.sendAction();
+                this.close();
             },
             confirm: function (type) {
                 this.sendAction('confirm' + type);
-                this.sendAction();
-            }
+                this.close();
+            },
+            noBubble: Ember.K
         },
 
-        klass: Ember.computed('type', 'style', 'animation', function () {
+        klass: Ember.computed('type', 'style', function () {
             var classNames = [];
 
             classNames.push(this.get('type') ? 'modal-' + this.get('type') : 'modal');
@@ -1052,8 +1041,6 @@ define("ghost/components/gh-modal-dialog",
                     classNames.push('modal-style-' + style);
                 });
             }
-
-            classNames.push(this.get('animation'));
 
             return classNames.join(' ');
         }),
@@ -1068,6 +1055,138 @@ define("ghost/components/gh-modal-dialog",
     });
 
     __exports__["default"] = ModalDialog;
+  });
+define("ghost/components/gh-navitem-url-input", 
+  ["exports"],
+  function(__exports__) {
+    "use strict";
+    function joinUrlParts(url, path) {
+        if (path[0] !== '/' && url.slice(-1) !== '/') {
+            path = '/' + path;
+        } else if (path[0] === '/' && url.slice(-1) === '/') {
+            path = path.slice(1);
+        }
+
+        return url + path;
+    }
+
+    var NavItemUrlInputComponent = Ember.TextField.extend({
+        classNameBindings: ['fakePlaceholder'],
+
+        isBaseUrl: Ember.computed('baseUrl', 'value', function () {
+            return this.get('baseUrl') === this.get('value');
+        }),
+
+        fakePlaceholder: Ember.computed('isBaseUrl', 'hasFocus', function () {
+            return this.get('isBaseUrl') && this.get('last') && !this.get('hasFocus');
+        }),
+
+        isRelative: Ember.computed('value', function () {
+            return !validator.isURL(this.get('value')) && this.get('value').indexOf('mailto:') !== 0;
+        }),
+
+        didInsertElement: function () {
+            var url = this.get('url'),
+                baseUrl = this.get('baseUrl');
+
+            this.set('value', url);
+
+            // if we have a relative url, create the absolute url to be displayed in the input
+            if (this.get('isRelative')) {
+                url = joinUrlParts(baseUrl, url);
+                this.set('value', url);
+            }
+        },
+
+        focusIn: function (event) {
+            this.set('hasFocus', true);
+
+            if (this.get('isBaseUrl')) {
+                // position the cursor at the end of the input
+                Ember.run.next(function (el) {
+                    var length = el.value.length;
+
+                    el.setSelectionRange(length, length);
+                }, event.target);
+            }
+        },
+
+        keyDown: function (event) {
+            // delete the "placeholder" value all at once
+            if (this.get('isBaseUrl') && (event.keyCode === 8 || event.keyCode === 46)) {
+                this.set('value', '');
+
+                event.preventDefault();
+            }
+        },
+
+        keyPress: function (event) {
+            // enter key
+            if (event.keyCode === 13) {
+                event.preventDefault();
+                this.notifyUrlChanged();
+            }
+
+            return true;
+        },
+
+        focusOut: function () {
+            this.set('hasFocus', false);
+
+            this.notifyUrlChanged();
+        },
+
+        notifyUrlChanged: function () {
+            this.set('value', this.get('value').trim());
+
+            var url = this.get('value'),
+                baseUrl = this.get('baseUrl');
+
+            // if we have a relative url, create the absolute url to be displayed in the input
+            if (this.get('isRelative')) {
+                this.set('value', joinUrlParts(baseUrl, url));
+            }
+
+            this.sendAction('change', url);
+        }
+    });
+
+    __exports__["default"] = NavItemUrlInputComponent;
+  });
+define("ghost/components/gh-navitem", 
+  ["exports"],
+  function(__exports__) {
+    "use strict";
+    var NavItemComponent = Ember.Component.extend({
+        classNames: 'navigation-item',
+
+        attributeBindings: ['order:data-order'],
+        order: Ember.computed.readOnly('navItem.order'),
+
+        keyPress: function (event) {
+            // enter key
+            if (event.keyCode === 13) {
+                event.preventDefault();
+                this.get('controller').send('addItem');
+            }
+        },
+
+        actions: {
+            addItem: function () {
+                this.sendAction('addItem');
+            },
+
+            deleteItem: function (item) {
+                this.sendAction('deleteItem', item);
+            },
+
+            updateUrl: function (value) {
+                this.sendAction('updateUrl', value, this.get('navItem'));
+            }
+        }
+    });
+
+    __exports__["default"] = NavItemComponent;
   });
 define("ghost/components/gh-notification", 
   ["exports"],
@@ -1462,16 +1581,20 @@ define("ghost/components/gh-trim-focus-input",
         attributeBindings: ['autofocus'],
 
         autofocus: Ember.computed(function () {
-            return (device.ios()) ? false : 'autofocus';
+            if (this.get('focus')) {
+                return (device.ios()) ? false : 'autofocus';
+            }
+
+            return false;
         }),
 
-        setFocus: function () {
+        didInsertElement: function () {
             // This fix is required until Mobile Safari has reliable
             // autofocus, select() or focus() support
-            if (this.focus && !device.ios()) {
+            if (this.get('focus') && !device.ios()) {
                 this.$().val(this.$().val()).focus();
             }
-        }.on('didInsertElement'),
+        },
 
         focusOut: function () {
             var text = this.$().val();
@@ -1483,11 +1606,12 @@ define("ghost/components/gh-trim-focus-input",
     __exports__["default"] = TrimFocusInput;
   });
 define("ghost/components/gh-upload-modal", 
-  ["ghost/components/gh-modal-dialog","ghost/assets/lib/uploader","exports"],
-  function(__dependency1__, __dependency2__, __exports__) {
+  ["ghost/components/gh-modal-dialog","ghost/assets/lib/uploader","ghost/utils/caja-sanitizers","exports"],
+  function(__dependency1__, __dependency2__, __dependency3__, __exports__) {
     "use strict";
     var ModalDialog = __dependency1__["default"];
     var upload = __dependency2__["default"];
+    var cajaSanitizers = __dependency3__["default"];
 
     var UploadModal = ModalDialog.extend({
         layoutName: 'components/gh-modal-dialog',
@@ -1495,6 +1619,16 @@ define("ghost/components/gh-upload-modal",
         didInsertElement: function () {
             this._super();
             upload.call(this.$('.js-drop-zone'), {fileStorage: this.get('config.fileStorage')});
+        },
+        keyDown: function () {
+            this.setErrorState(false);
+        },
+        setErrorState: function (state) {
+            if (state) {
+                this.$('.js-upload-url').addClass('error');
+            } else {
+                this.$('.js-upload-url').removeClass('error');
+            }
         },
         confirm: {
             reject: {
@@ -1506,15 +1640,23 @@ define("ghost/components/gh-upload-modal",
             },
             accept: {
                 buttonClass: 'btn btn-blue right',
-                text: 'Save', // The accept button texttext: 'Save'
+                text: 'Save', // The accept button text: 'Save'
                 func: function () {
-                    var imageType = 'model.' + this.get('imageType');
+                    var imageType = 'model.' + this.get('imageType'),
+                        value;
 
                     if (this.$('.js-upload-url').val()) {
-                        this.set(imageType, this.$('.js-upload-url').val());
+                        value = this.$('.js-upload-url').val();
+
+                        if (!Ember.isEmpty(value) && !cajaSanitizers.url(value)) {
+                            this.setErrorState(true);
+                            return {message: 'Image URI is not valid'};
+                        }
                     } else {
-                        this.set(imageType, this.$('.js-upload-target').attr('src'));
+                        value = this.$('.js-upload-target').attr('src');
                     }
+
+                    this.set(imageType, value);
                     return true;
                 }
             }
@@ -1525,12 +1667,17 @@ define("ghost/components/gh-upload-modal",
                 this.sendAction();
             },
             confirm: function (type) {
-                var func = this.get('confirm.' + type + '.func');
+                var result,
+                    func = this.get('confirm.' + type + '.func');
+
                 if (typeof func === 'function') {
-                    func.apply(this);
+                    result = func.apply(this);
                 }
-                this.sendAction();
-                this.sendAction('confirm' + type);
+
+                if (!result.message) {
+                    this.sendAction();
+                    this.sendAction('confirm' + type);
+                }
             }
         }
     });
@@ -1545,6 +1692,10 @@ define("ghost/components/gh-uploader",
 
     var PostImageUploader = Ember.Component.extend({
         classNames: ['image-uploader', 'js-post-image-upload'],
+
+        imageSource: Ember.computed('image', function () {
+            return this.get('image') || '';
+        }),
 
         setup: function () {
             var $this = this.$(),
@@ -1576,6 +1727,37 @@ define("ghost/components/gh-uploader",
 
     __exports__["default"] = PostImageUploader;
   });
+define("ghost/components/gh-url-preview", 
+  ["exports"],
+  function(__exports__) {
+    "use strict";
+    /*
+    Example usage:
+    {{gh-url-preview prefix="tag" slug=theSlugValue tagName="p" classNames="description"}}
+    */
+    var urlPreview = Ember.Component.extend({
+        classNames: 'ghost-url-preview',
+        prefix: null,
+        slug: null,
+
+        url: Ember.computed('slug', function () {
+            // Get the blog URL and strip the scheme
+            var blogUrl = this.get('config').blogUrl,
+                noSchemeBlogUrl = blogUrl.substr(blogUrl.indexOf('://') + 3), // Remove `http[s]://`
+
+                // Get the prefix and slug values
+                prefix = this.get('prefix') ? this.get('prefix') + '/' : '',
+                slug = this.get('slug') ? this.get('slug') + '/' : '',
+
+                // Join parts of the URL together with slashes
+                theUrl = noSchemeBlogUrl + '/' + prefix + slug;
+
+            return theUrl;
+        })
+    });
+
+    __exports__["default"] = urlPreview;
+  });
 define("ghost/config", 
   ["exports"],
   function(__exports__) {
@@ -1601,10 +1783,18 @@ define("ghost/controllers/application",
         showGlobalMobileNav: false,
         showSettingsMenu: false,
 
-         userImageAlt: Ember.computed('session.user.name', function () {
+        userImage: Ember.computed('session.user.image', function () {
+            return this.get('session.user.image') || this.get('ghostPaths.url').asset('/shared/img/user-image.png');
+        }),
+
+        userImageBackground: Ember.computed('userImage', function () {
+            return 'background-image: url(' + this.get('userImage') + ')';
+        }),
+
+        userImageAlt: Ember.computed('session.user.name', function () {
             var name = this.get('session.user.name');
 
-            return name + '\'s profile picture';
+            return (name) ? name + '\'s profile picture' : 'Profile picture';
         }),
 
         actions: {
@@ -1622,7 +1812,7 @@ define("ghost/controllers/editor/edit",
     "use strict";
     var EditorControllerMixin = __dependency1__["default"];
 
-    var EditorEditController = Ember.ObjectController.extend(EditorControllerMixin);
+    var EditorEditController = Ember.Controller.extend(EditorControllerMixin);
 
     __exports__["default"] = EditorEditController;
   });
@@ -1632,7 +1822,7 @@ define("ghost/controllers/editor/new",
     "use strict";
     var EditorControllerMixin = __dependency1__["default"];
 
-    var EditorNewController = Ember.ObjectController.extend(EditorControllerMixin, {
+    var EditorNewController = Ember.Controller.extend(EditorControllerMixin, {
         actions: {
             /**
               * Redirect to editor after the first save
@@ -1669,6 +1859,44 @@ define("ghost/controllers/error",
     });
 
     __exports__["default"] = ErrorController;
+  });
+define("ghost/controllers/feature", 
+  ["exports"],
+  function(__exports__) {
+    "use strict";
+    var FeatureController = Ember.Controller.extend(Ember.PromiseProxyMixin, {
+        init: function () {
+            var promise;
+
+            promise = this.store.find('setting', {type: 'blog,theme'}).then(function (settings) {
+                return settings.get('firstObject');
+            });
+
+            this.set('promise', promise);
+        },
+
+        setting: Ember.computed.alias('content'),
+
+        labs: Ember.computed('isSettled', 'setting.labs', function () {
+            var value = {};
+
+            if (this.get('isFulfilled')) {
+                try {
+                    value = JSON.parse(this.get('setting.labs') || {});
+                } catch (err) {
+                    value = {};
+                }
+            }
+
+            return value;
+        }),
+
+        codeInjectionUI: Ember.computed('config.codeInjectionUI', 'labs.codeInjectionUI', function () {
+            return this.get('config.codeInjectionUI') || this.get('labs.codeInjectionUI');
+        })
+    });
+
+    __exports__["default"] = FeatureController;
   });
 define("ghost/controllers/forgotten", 
   ["ghost/utils/ajax","ghost/mixins/validation-engine","exports"],
@@ -1810,15 +2038,58 @@ define("ghost/controllers/modals/delete-post",
 
     __exports__["default"] = DeletePostController;
   });
+define("ghost/controllers/modals/delete-tag", 
+  ["exports"],
+  function(__exports__) {
+    "use strict";
+    var DeleteTagController = Ember.Controller.extend({
+        postInflection: Ember.computed('model.post_count', function () {
+            return this.get('model.post_count') > 1 ? 'posts' : 'post';
+        }),
+
+        actions: {
+            confirmAccept: function () {
+                var tag = this.get('model'),
+                    name = tag.get('name'),
+                    self = this;
+
+                this.send('closeSettingsMenu');
+
+                tag.destroyRecord().then(function () {
+                    self.notifications.showSuccess('Deleted ' + name);
+                }).catch(function (error) {
+                    self.notifications.showAPIError(error);
+                });
+            },
+
+            confirmReject: function () {
+                return false;
+            }
+        },
+
+        confirm: {
+            accept: {
+                text: 'Delete',
+                buttonClass: 'btn btn-red'
+            },
+            reject: {
+                text: 'Cancel',
+                buttonClass: 'btn btn-default btn-minor'
+            }
+        }
+    });
+
+    __exports__["default"] = DeleteTagController;
+  });
 define("ghost/controllers/modals/delete-user", 
   ["exports"],
   function(__exports__) {
     "use strict";
-    var DeleteUserController = Ember.ObjectController.extend({
-        userPostCount: Ember.computed('id', function () {
+    var DeleteUserController = Ember.Controller.extend({
+        userPostCount: Ember.computed('model.id', function () {
             var promise,
                 query = {
-                    author: this.get('slug'),
+                    author: this.get('model.slug'),
                     status: 'all'
                 };
 
@@ -2020,13 +2291,17 @@ define("ghost/controllers/modals/leave-editor",
     __exports__["default"] = LeaveEditorController;
   });
 define("ghost/controllers/modals/signin", 
-  ["ghost/controllers/signin","exports"],
+  ["ghost/mixins/validation-engine","exports"],
   function(__dependency1__, __exports__) {
     "use strict";
-    var SigninController = __dependency1__["default"];
+    var ValidationEngine = __dependency1__["default"];
 
-    __exports__["default"] = SigninController.extend({
+    __exports__["default"] = Ember.Controller.extend(SimpleAuth.AuthenticationControllerMixin, ValidationEngine, {
         needs: 'application',
+
+        authenticator: 'simple-auth-authenticator:oauth2-password-grant',
+
+        validationType: 'signin',
 
         identification: Ember.computed('session.user.email', function () {
             return this.get('session.user.email');
@@ -2039,12 +2314,31 @@ define("ghost/controllers/modals/signin",
 
                 appController.set('skipAuthSuccessHandler', true);
 
-                this._super().then(function () {
+                this._super(this.getProperties('identification', 'password')).then(function () {
                     self.send('closeModal');
                     self.notifications.showSuccess('Login successful.');
                     self.set('password', '');
+                }).catch(function () {
+                    // if authentication fails a rejected promise will be returned.
+                    // it needs to be caught so it doesn't generate an exception in the console,
+                    // but it's actually "handled" by the sessionAuthenticationFailed action handler.
                 }).finally(function () {
                     appController.set('skipAuthSuccessHandler', undefined);
+                });
+            },
+
+            validateAndAuthenticate: function () {
+                var self = this;
+
+                // Manually trigger events for input fields, ensuring legacy compatibility with
+                // browsers and password managers that don't send proper events on autofill
+                $('#login').find('input').trigger('change');
+
+                this.validate({format: false}).then(function () {
+                    self.notifications.closePassive();
+                    self.send('authenticate');
+                }).catch(function (errors) {
+                    self.notifications.showErrors(errors);
                 });
             },
 
@@ -2139,46 +2433,34 @@ define("ghost/controllers/modals/upload",
     __exports__["default"] = UploadController;
   });
 define("ghost/controllers/post-settings-menu", 
-  ["ghost/utils/date-formatting","ghost/models/slug-generator","ghost/utils/bound-one-way","ghost/utils/isNumber","exports"],
-  function(__dependency1__, __dependency2__, __dependency3__, __dependency4__, __exports__) {
+  ["ghost/utils/date-formatting","ghost/mixins/settings-menu-controller","ghost/models/slug-generator","ghost/utils/bound-one-way","ghost/utils/isNumber","exports"],
+  function(__dependency1__, __dependency2__, __dependency3__, __dependency4__, __dependency5__, __exports__) {
     "use strict";
     /* global moment */
     var parseDateString = __dependency1__.parseDateString;
     var formatDate = __dependency1__.formatDate;
-    var SlugGenerator = __dependency2__["default"];
-    var boundOneWay = __dependency3__["default"];
-    var isNumber = __dependency4__["default"];
+    var SettingsMenuMixin = __dependency2__["default"];
+    var SlugGenerator = __dependency3__["default"];
+    var boundOneWay = __dependency4__["default"];
+    var isNumber = __dependency5__["default"];
 
-    var PostSettingsMenuController = Ember.ObjectController.extend({
-        // State for if the user is viewing a tab's pane.
-        needs: 'application',
-
+    var PostSettingsMenuController = Ember.Controller.extend(SettingsMenuMixin, {
+        debounceId: null,
         lastPromise: null,
-
-        isViewingSubview: Ember.computed('controllers.application.showSettingsMenu', function (key, value) {
-            // Not viewing a subview if we can't even see the PSM
-            if (!this.get('controllers.application.showSettingsMenu')) {
-                return false;
-            }
-            if (arguments.length > 1) {
-                return value;
-            }
-
-            return false;
-        }),
-
         selectedAuthor: null,
+        uploaderReference: null,
+
         initializeSelectedAuthor: function () {
             var self = this;
 
-            return this.get('author').then(function (author) {
+            return this.get('model.author').then(function (author) {
                 self.set('selectedAuthor', author);
                 return author;
             });
         }.observes('model'),
 
         changeAuthor: function () {
-            var author = this.get('author'),
+            var author = this.get('model.author'),
                 selectedAuthor = this.get('selectedAuthor'),
                 model = this.get('model'),
                 self = this;
@@ -2191,7 +2473,7 @@ define("ghost/controllers/post-settings-menu",
             model.set('author', selectedAuthor);
 
             // if this is a new post (never been saved before), don't try to save it
-            if (this.get('isNew')) {
+            if (this.get('model.isNew')) {
                 return;
             }
 
@@ -2219,8 +2501,15 @@ define("ghost/controllers/post-settings-menu",
                 .create(deferred);
         }),
 
-        publishedAtValue: Ember.computed('published_at', function () {
-            var pubDate = this.get('published_at');
+        /*jshint unused:false */
+        publishedAtValue: Ember.computed('model.published_at', function (key, value) {
+            var pubDate = this.get('model.published_at');
+
+            // We're using a fake setter to reset
+            // the cache for this property
+            if (arguments.length > 1) {
+                return formatDate(moment());
+            }
 
             if (pubDate) {
                 return formatDate(pubDate);
@@ -2228,8 +2517,9 @@ define("ghost/controllers/post-settings-menu",
 
             return formatDate(moment());
         }),
+        /*jshint unused:true */
 
-        slugValue: boundOneWay('slug'),
+        slugValue: boundOneWay('model.slug'),
 
         // Lazy load the slug generator
         slugGenerator: Ember.computed(function () {
@@ -2242,12 +2532,12 @@ define("ghost/controllers/post-settings-menu",
         // Requests slug from title
         generateAndSetSlug: function (destination) {
             var self = this,
-                title = this.get('titleScratch'),
+                title = this.get('model.titleScratch'),
                 afterSave = this.get('lastPromise'),
                 promise;
 
             // Only set an "untitled" slug once per post
-            if (title === '(Untitled)' && this.get('slug')) {
+            if (title === '(Untitled)' && this.get('model.slug')) {
                 return;
             }
 
@@ -2264,24 +2554,24 @@ define("ghost/controllers/post-settings-menu",
             this.set('lastPromise', promise);
         },
 
-        metaTitleScratch: boundOneWay('meta_title'),
-        metaDescriptionScratch: boundOneWay('meta_description'),
+        metaTitleScratch: boundOneWay('model.meta_title'),
+        metaDescriptionScratch: boundOneWay('model.meta_description'),
 
-        seoTitle: Ember.computed('titleScratch', 'metaTitleScratch', function () {
+        seoTitle: Ember.computed('model.titleScratch', 'metaTitleScratch', function () {
             var metaTitle = this.get('metaTitleScratch') || '';
 
-            metaTitle = metaTitle.length > 0 ? metaTitle : this.get('titleScratch');
+            metaTitle = metaTitle.length > 0 ? metaTitle : this.get('model.titleScratch');
 
             if (metaTitle.length > 70) {
                 metaTitle = metaTitle.substring(0, 70).trim();
                 metaTitle = Ember.Handlebars.Utils.escapeExpression(metaTitle);
-                metaTitle = new Ember.Handlebars.SafeString(metaTitle + '&hellip;');
+                metaTitle = Ember.String.htmlSafe(metaTitle + '&hellip;');
             }
 
             return metaTitle;
         }),
 
-        seoDescription: Ember.computed('scratch', 'metaDescriptionScratch', function () {
+        seoDescription: Ember.computed('model.scratch', 'metaDescriptionScratch', function () {
             var metaDescription = this.get('metaDescriptionScratch') || '',
                 el,
                 html = '',
@@ -2311,15 +2601,15 @@ define("ghost/controllers/post-settings-menu",
                 // Limit to 156 characters
                 placeholder = placeholder.substring(0, 156).trim();
                 placeholder = Ember.Handlebars.Utils.escapeExpression(placeholder);
-                placeholder = new Ember.Handlebars.SafeString(placeholder + '&hellip;');
+                placeholder = Ember.String.htmlSafe(placeholder + '&hellip;');
             }
 
             return placeholder;
         }),
 
-        seoURL: Ember.computed('slug', function () {
+        seoURL: Ember.computed('model.slug', function () {
             var blogUrl = this.get('config').blogUrl,
-                seoSlug = this.get('slug') ? this.get('slug') : '',
+                seoSlug = this.get('model.slug') ? this.get('model.slug') : '',
                 seoURL = blogUrl + '/' + seoSlug;
 
             // only append a slash to the URL if the slug exists
@@ -2329,7 +2619,7 @@ define("ghost/controllers/post-settings-menu",
 
             if (seoURL.length > 70) {
                 seoURL = seoURL.substring(0, 70).trim();
-                seoURL = new Ember.Handlebars.SafeString(seoURL + '&hellip;');
+                seoURL = Ember.String.htmlSafe(seoURL + '&hellip;');
             }
 
             return seoURL;
@@ -2338,19 +2628,19 @@ define("ghost/controllers/post-settings-menu",
         // observe titleScratch, keeping the post's slug in sync
         // with it until saved for the first time.
         addTitleObserver: function () {
-            if (this.get('isNew') || this.get('title') === '(Untitled)') {
-                this.addObserver('titleScratch', this, 'titleObserver');
+            if (this.get('model.isNew') || this.get('model.title') === '(Untitled)') {
+                this.addObserver('model.titleScratch', this, 'titleObserver');
             }
         }.observes('model'),
 
         titleObserver: function () {
             var debounceId,
-                title = this.get('title');
+                title = this.get('model.title');
 
             // generate a slug if a post is new and doesn't have a title yet or
             // if the title is still '(Untitled)' and the slug is unaltered.
-            if ((this.get('isNew') && !title) || title === '(Untitled)') {
-                debounceId = Ember.run.debounce(this, 'generateAndSetSlug', ['slug'], 700);
+            if ((this.get('model.isNew') && !title) || title === '(Untitled)') {
+                debounceId = Ember.run.debounce(this, 'generateAndSetSlug', 'model.slug', 700);
             }
 
             this.set('debounceId', debounceId);
@@ -2369,10 +2659,10 @@ define("ghost/controllers/post-settings-menu",
             togglePage: function () {
                 var self = this;
 
-                this.toggleProperty('page');
+                this.toggleProperty('model.page');
                 // If this is a new post.  Don't save the model.  Defer the save
                 // to the user pressing the save button
-                if (this.get('isNew')) {
+                if (this.get('model.isNew')) {
                     return;
                 }
 
@@ -2385,11 +2675,11 @@ define("ghost/controllers/post-settings-menu",
             toggleFeatured: function () {
                 var self = this;
 
-                this.toggleProperty('featured');
+                this.toggleProperty('model.featured');
 
                 // If this is a new post.  Don't save the model.  Defer the save
                 // to the user pressing the save button
-                if (this.get('isNew')) {
+                if (this.get('model.isNew')) {
                     return;
                 }
 
@@ -2403,7 +2693,7 @@ define("ghost/controllers/post-settings-menu",
              * triggered by user manually changing slug
              */
             updateSlug: function (newSlug) {
-                var slug = this.get('slug'),
+                var slug = this.get('model.slug'),
                     self = this;
 
                 newSlug = newSlug || slug;
@@ -2445,15 +2735,15 @@ define("ghost/controllers/post-settings-menu",
                         }
                     }
 
-                    self.set('slug', serverSlug);
+                    self.set('model.slug', serverSlug);
 
-                    if (self.hasObserverFor('titleScratch')) {
-                        self.removeObserver('titleScratch', self, 'titleObserver');
+                    if (self.hasObserverFor('model.titleScratch')) {
+                        self.removeObserver('model.titleScratch', self, 'titleObserver');
                     }
 
                     // If this is a new post.  Don't save the model.  Defer the save
                     // to the user pressing the save button
-                    if (self.get('isNew')) {
+                    if (self.get('model.isNew')) {
                         return;
                     }
 
@@ -2472,13 +2762,13 @@ define("ghost/controllers/post-settings-menu",
             setPublishedAt: function (userInput) {
                 var errMessage = '',
                     newPublishedAt = parseDateString(userInput),
-                    publishedAt = this.get('published_at'),
+                    publishedAt = this.get('model.published_at'),
                     self = this;
 
                 if (!userInput) {
                     // Clear out the published_at field for a draft
-                    if (this.get('isDraft')) {
-                        this.set('published_at', null);
+                    if (this.get('model.isDraft')) {
+                        this.set('model.published_at', null);
                     }
 
                     return;
@@ -2506,11 +2796,11 @@ define("ghost/controllers/post-settings-menu",
                 }
 
                 // Validation complete
-                this.set('published_at', newPublishedAt);
+                this.set('model.published_at', newPublishedAt);
 
                 // If this is a new post.  Don't save the model.  Defer the save
                 // to the user pressing the save button
-                if (this.get('isNew')) {
+                if (this.get('model.isNew')) {
                     return;
                 }
 
@@ -2522,18 +2812,18 @@ define("ghost/controllers/post-settings-menu",
 
             setMetaTitle: function (metaTitle) {
                 var self = this,
-                    currentTitle = this.get('meta_title') || '';
+                    currentTitle = this.get('model.meta_title') || '';
 
                 // Only update if the title has changed
                 if (currentTitle === metaTitle) {
                     return;
                 }
 
-                this.set('meta_title', metaTitle);
+                this.set('model.meta_title', metaTitle);
 
                 // If this is a new post.  Don't save the model.  Defer the save
                 // to the user pressing the save button
-                if (this.get('isNew')) {
+                if (this.get('model.isNew')) {
                     return;
                 }
 
@@ -2544,18 +2834,18 @@ define("ghost/controllers/post-settings-menu",
 
             setMetaDescription: function (metaDescription) {
                 var self = this,
-                    currentDescription = this.get('meta_description') || '';
+                    currentDescription = this.get('model.meta_description') || '';
 
                 // Only update if the description has changed
                 if (currentDescription === metaDescription) {
                     return;
                 }
 
-                this.set('meta_description', metaDescription);
+                this.set('model.meta_description', metaDescription);
 
                 // If this is a new post.  Don't save the model.  Defer the save
                 // to the user pressing the save button
-                if (this.get('isNew')) {
+                if (this.get('model.isNew')) {
                     return;
                 }
 
@@ -2567,9 +2857,9 @@ define("ghost/controllers/post-settings-menu",
             setCoverImage: function (image) {
                 var self = this;
 
-                this.set('image', image);
+                this.set('model.image', image);
 
-                if (this.get('isNew')) {
+                if (this.get('model.isNew')) {
                     return;
                 }
 
@@ -2582,9 +2872,9 @@ define("ghost/controllers/post-settings-menu",
             clearCoverImage: function () {
                 var self = this;
 
-                this.set('image', '');
+                this.set('model.image', '');
 
-                if (this.get('isNew')) {
+                if (this.get('model.isNew')) {
                     return;
                 }
 
@@ -2594,20 +2884,16 @@ define("ghost/controllers/post-settings-menu",
                 });
             },
 
-            showSubview: function () {
-                this.set('isViewingSubview', true);
-            },
-
-            closeSubview: function () {
-                this.set('isViewingSubview', false);
-            },
-
             resetUploader: function () {
                 var uploader = this.get('uploaderReference');
 
                 if (uploader && uploader[0]) {
                     uploader[0].uploaderUi.reset();
                 }
+            },
+
+            resetPubDate: function () {
+                this.set('publishedAtValue', '');
             }
         }
     });
@@ -2621,9 +2907,9 @@ define("ghost/controllers/post-tags-input",
     var PostTagsInputController = Ember.Controller.extend({
         tagEnteredOrder: Ember.A(),
 
-        tags: Ember.computed('parentController.tags', function () {
+        tags: Ember.computed('parentController.model.tags', function () {
             var proxyTags = Ember.ArrayProxy.create({
-                content: this.get('parentController.tags')
+                content: this.get('parentController.model.tags')
             }),
             temp = proxyTags.get('arrangedContent').slice();
 
@@ -2653,7 +2939,7 @@ define("ghost/controllers/post-tags-input",
             // queries hit a full store cache and we don't see empty or out-of-date
             // suggestion lists
             loadAllTags: function () {
-                this.store.find('tag');
+                this.store.find('tag', {limit: 'all'});
             },
 
             addNewTag: function () {
@@ -2672,8 +2958,13 @@ define("ghost/controllers/post-tags-input",
 
                 // add existing tag if we have a match
                 existingTags = this.store.all('tag').filter(function (tag) {
+                    if (tag.get('isNew')) {
+                        return false;
+                    }
+
                     return tag.get('name').toLowerCase() === searchTerm;
                 });
+
                 if (existingTags.get('length')) {
                     this.send('addTag', existingTags.get('firstObject'));
                 } else {
@@ -2805,7 +3096,7 @@ define("ghost/controllers/post-tags-input",
         findMatchingTags: function (searchTerm) {
             var matchingTags,
                 self = this,
-                allTags = this.store.all('tag'),
+                allTags = this.store.all('tag').filterBy('isNew', false),
                 deDupe = {};
 
             if (allTags.get('length') === 0) {
@@ -2842,16 +3133,14 @@ define("ghost/controllers/post-tags-input",
 
         makeSuggestionObject: function (matchingTag, _searchTerm) {
             var searchTerm = Ember.Handlebars.Utils.escapeExpression(_searchTerm),
-                // jscs:disable
                 regexEscapedSearchTerm = searchTerm.replace(/[\-\[\]\/\{\}\(\)\*\+\?\.\\\^\$\|]/g, '\\$&'),
-                // jscs:enable
                 tagName = Ember.Handlebars.Utils.escapeExpression(matchingTag.get('name')),
                 regex = new RegExp('(' + regexEscapedSearchTerm + ')', 'gi'),
                 highlightedName,
                 suggestion = Ember.Object.create();
 
             highlightedName = tagName.replace(regex, '<mark>$1</mark>');
-            highlightedName = new Ember.Handlebars.SafeString(highlightedName);
+            highlightedName = Ember.String.htmlSafe(highlightedName);
 
             suggestion.set('tag', matchingTag);
             suggestion.set('highlightedName', highlightedName);
@@ -2904,9 +3193,11 @@ define("ghost/controllers/posts",
         //     status: ASC
         //     published_at: DESC
         //     updated_at: DESC
+        //     id: DESC
         orderBy: function (item1, item2) {
             var updated1 = item1.get('updated_at'),
                 updated2 = item2.get('updated_at'),
+                idResult,
                 statusResult,
                 updatedAtResult,
                 publishedAtResult;
@@ -2921,12 +3212,17 @@ define("ghost/controllers/posts",
                 return 1;
             }
 
+            idResult = Ember.compare(parseInt(item1.get('id')), parseInt(item2.get('id')));
             statusResult = Ember.compare(item1.get('status'), item2.get('status'));
             updatedAtResult = Ember.compare(updated1.valueOf(), updated2.valueOf());
             publishedAtResult = publishedAtCompare(item1, item2);
 
             if (statusResult === 0) {
                 if (publishedAtResult === 0) {
+                    if (updatedAtResult === 0) {
+                        // This should be DESC
+                        return idResult * -1;
+                    }
                     // This should be DESC
                     return updatedAtResult * -1;
                 }
@@ -2950,16 +3246,28 @@ define("ghost/controllers/posts/post",
   ["exports"],
   function(__exports__) {
     "use strict";
-    var PostController = Ember.ObjectController.extend({
-        isPublished: Ember.computed.equal('status', 'published'),
-        classNameBindings: ['featured'],
+    var PostController = Ember.Controller.extend({
+        isPublished: Ember.computed.equal('model.status', 'published'),
+        classNameBindings: ['model.featured'],
+
+        authorName: Ember.computed('model.author.name', 'model.author.email', function () {
+            return this.get('model.author.name') || this.get('model.author.email');
+        }),
+
+        authorAvatar: Ember.computed('model.author.image', function () {
+            return this.get('model.author.image') || this.get('ghostPaths.url').asset('/shared/img/user-image.png');
+        }),
+
+        authorAvatarBackground: Ember.computed('authorAvatar', function () {
+            return 'background-image: url(' + this.get('authorAvatar') + ')';
+        }),
 
         actions: {
             toggleFeatured: function () {
                 var options = {disableNProgress: true},
                     self = this;
 
-                this.toggleProperty('featured');
+                this.toggleProperty('model.featured');
                 this.get('model').save(options).catch(function (errors) {
                     self.notifications.showErrors(errors);
                 });
@@ -2985,7 +3293,7 @@ define("ghost/controllers/reset",
         newPassword: '',
         ne2Password: '',
         token: '',
-        submitButtonDisabled: false,
+        submitting: false,
     
         validationType: 'reset',
     
@@ -3043,24 +3351,26 @@ define("ghost/controllers/settings",
   function(__exports__) {
     "use strict";
     var SettingsController = Ember.Controller.extend({
+        needs: ['feature'],
+
         showGeneral: Ember.computed('session.user.name', function () {
             return this.get('session.user.isAuthor') || this.get('session.user.isEditor') ? false : true;
         }),
         showUsers: Ember.computed('session.user.name', function () {
             return this.get('session.user.isAuthor') ? false : true;
         }),
-        showTags: Ember.computed('session.user.name', 'config.tagsUI', function () {
-            return this.get('session.user.isAuthor') || !this.get('config.tagsUI') ? false : true;
+        showTags: Ember.computed('session.user.name', function () {
+            return this.get('session.user.isAuthor') ? false : true;
         }),
-
-        showCodeInjection: Ember.computed('session.user.name', 'config.codeInjectionUI', function () {
-            return this.get('session.user.isAuthor') || this.get('session.user.isEditor') || !this.get('config.codeInjectionUI') ? false : true;
+        showNavigation: Ember.computed('session.user.name', function () {
+            return this.get('session.user.isAuthor') || this.get('session.user.isEditor') ? false : true;
         }),
-
+        showCodeInjection: Ember.computed('session.user.name', 'controllers.feature.codeInjectionUI', function () {
+            return this.get('session.user.isAuthor') || this.get('session.user.isEditor') || !this.get('controllers.feature.codeInjectionUI') ? false : true;
+        }),
         showLabs: Ember.computed('session.user.name', function () {
             return this.get('session.user.isAuthor')  || this.get('session.user.isEditor') ? false : true;
         }),
-
         showAbout: Ember.computed('session.user.name', function () {
             return this.get('session.user.isAuthor') ? false : true;
         })
@@ -3083,7 +3393,7 @@ define("ghost/controllers/settings/app",
         inactive: 'inactive'
     };
 
-    SettingsAppController = Ember.ObjectController.extend({
+    SettingsAppController = Ember.Controller.extend({
         appState: appStates.active,
         buttonText: '',
 
@@ -3140,7 +3450,7 @@ define("ghost/controllers/settings/code-injection",
   ["exports"],
   function(__exports__) {
     "use strict";
-    var SettingsCodeInjectionController = Ember.ObjectController.extend({
+    var SettingsCodeInjectionController = Ember.Controller.extend({
         actions: {
             save: function () {
                 var self = this;
@@ -3164,21 +3474,31 @@ define("ghost/controllers/settings/general",
   ["exports"],
   function(__exports__) {
     "use strict";
-    var SettingsGeneralController = Ember.ObjectController.extend({
-        isDatedPermalinks: Ember.computed('permalinks', function (key, value) {
+    var SettingsGeneralController = Ember.Controller.extend({
+        selectedTheme: null,
+
+        logoImageSource: Ember.computed('model.logo', function () {
+            return this.get('model.logo') || '';
+        }),
+
+        coverImageSource: Ember.computed('model.cover', function () {
+            return this.get('model.cover') || '';
+        }),
+
+        isDatedPermalinks: Ember.computed('model.permalinks', function (key, value) {
             // setter
             if (arguments.length > 1) {
-                this.set('permalinks', value ? '/:year/:month/:day/:slug/' : '/:slug/');
+                this.set('model.permalinks', value ? '/:year/:month/:day/:slug/' : '/:slug/');
             }
 
             // getter
-            var slugForm = this.get('permalinks');
+            var slugForm = this.get('model.permalinks');
 
             return slugForm !== '/:slug/';
         }),
 
         themes: Ember.computed(function () {
-            return this.get('availableThemes').reduce(function (themes, t) {
+            return this.get('model.availableThemes').reduce(function (themes, t) {
                 var theme = {};
 
                 theme.name = t.name;
@@ -3206,8 +3526,10 @@ define("ghost/controllers/settings/general",
             },
 
             checkPostsPerPage: function () {
-                if (this.get('postsPerPage') < 1 || this.get('postsPerPage') > 1000 || isNaN(this.get('postsPerPage'))) {
-                    this.set('postsPerPage', 5);
+                var postsPerPage = this.get('model.postsPerPage');
+
+                if (postsPerPage < 1 || postsPerPage > 1000 || isNaN(postsPerPage)) {
+                    this.set('model.postsPerPage', 5);
                 }
             }
         }
@@ -3220,8 +3542,40 @@ define("ghost/controllers/settings/labs",
   function(__exports__) {
     "use strict";
     var LabsController = Ember.Controller.extend(Ember.Evented, {
+        needs: ['feature'],
+
         uploadButtonText: 'Import',
         importErrors: '',
+        labsJSON: Ember.computed('model.labs', function () {
+            return JSON.parse(this.get('model.labs') || {});
+        }),
+
+        saveLabs: function (optionName, optionValue) {
+            var self = this,
+                labsJSON =  this.get('labsJSON');
+
+            // Set new value in the JSON object
+            labsJSON[optionName] = optionValue;
+
+            this.set('model.labs', JSON.stringify(labsJSON));
+
+            this.get('model').save().catch(function (errors) {
+                self.showErrors(errors);
+                self.get('model').rollback();
+            });
+        },
+
+        codeUIFlag: Ember.computed.alias('config.codeInjectionUI'),
+
+        useCodeInjectionUI: Ember.computed('controllers.feature.codeInjectionUI', function (key, value) {
+            // setter
+            if (arguments.length > 1) {
+                this.saveLabs('codeInjectionUI', value);
+            }
+
+            // getter
+            return this.get('controllers.feature.codeInjectionUI') || false;
+        }),
 
         actions: {
             onUpload: function (file) {
@@ -3242,6 +3596,13 @@ define("ghost/controllers/settings/labs",
                     contentType: false,
                     processData: false
                 }).then(function () {
+                    // Clear the store, so that all the new data gets fetched correctly.
+                    self.store.unloadAll('post');
+                    self.store.unloadAll('tag');
+                    self.store.unloadAll('user');
+                    self.store.unloadAll('role');
+                    self.store.unloadAll('setting');
+                    self.store.unloadAll('notification');
                     self.notifications.showSuccess('Import successful.');
                 }).catch(function (response) {
                     if (response && response.jqXHR && response.jqXHR.responseJSON && response.jqXHR.responseJSON.errors) {
@@ -3287,17 +3648,181 @@ define("ghost/controllers/settings/labs",
 
     __exports__["default"] = LabsController;
   });
+define("ghost/controllers/settings/navigation", 
+  ["exports"],
+  function(__exports__) {
+    "use strict";
+    var NavigationController,
+        NavItem;
+
+    NavItem = Ember.Object.extend({
+        label: '',
+        url: '',
+        last: false,
+
+        isComplete: Ember.computed('label', 'url', function () {
+            return !(Ember.isBlank(this.get('label').trim()) || Ember.isBlank(this.get('url')));
+        })
+    });
+
+    NavigationController = Ember.Controller.extend({
+        blogUrl: Ember.computed('config.blogUrl', function () {
+            var url = this.get('config.blogUrl');
+
+            return url.slice(-1) !== '/' ? url + '/' : url;
+        }),
+
+        navigationItems: Ember.computed('model.navigation', function () {
+            var navItems,
+                lastItem;
+
+            try {
+                navItems = JSON.parse(this.get('model.navigation') || [{}]);
+            } catch (e) {
+                navItems = [{}];
+            }
+
+            navItems = navItems.map(function (item) {
+                return NavItem.create(item);
+            });
+
+            lastItem = navItems.get('lastObject');
+            if (!lastItem || lastItem.get('isComplete')) {
+                navItems.addObject(NavItem.create({last: true}));
+            }
+
+            return navItems;
+        }),
+
+        updateLastNavItem: Ember.observer('navigationItems.[]', function () {
+            var navItems = this.get('navigationItems');
+
+            navItems.forEach(function (item, index, items) {
+                if (index === (items.length - 1)) {
+                    item.set('last', true);
+                } else {
+                    item.set('last', false);
+                }
+            });
+        }),
+
+        actions: {
+            addItem: function () {
+                var navItems = this.get('navigationItems'),
+                    lastItem = navItems.get('lastObject');
+
+                if (lastItem && lastItem.get('isComplete')) {
+                    navItems.addObject(NavItem.create({last: true})); // Adds new blank navItem
+                }
+            },
+
+            deleteItem: function (item) {
+                if (!item) {
+                    return;
+                }
+
+                var navItems = this.get('navigationItems');
+
+                navItems.removeObject(item);
+            },
+
+            moveItem: function (index, newIndex) {
+                var navItems = this.get('navigationItems'),
+                    item = navItems.objectAt(index);
+
+                navItems.removeAt(index);
+                navItems.insertAt(newIndex, item);
+            },
+
+            updateUrl: function (url, navItem) {
+                if (!navItem) {
+                    return;
+                }
+
+                if (Ember.isBlank(url)) {
+                    navItem.set('url', this.get('blogUrl'));
+
+                    return;
+                }
+
+                navItem.set('url', url);
+            },
+
+            save: function () {
+                var self = this,
+                    navSetting,
+                    blogUrl = this.get('config').blogUrl,
+                    blogUrlRegex = new RegExp('^' + blogUrl + '(.*)', 'i'),
+                    navItems = this.get('navigationItems'),
+                    message = 'One of your navigation items has an empty label. ' +
+                        '<br /> Please enter a new label or delete the item before saving.',
+                    match;
+
+                // Don't save if there's a blank label.
+                if (navItems.find(function (item) { return !item.get('isComplete') && !item.get('last');})) {
+                    self.notifications.showErrors([message.htmlSafe()]);
+                    return;
+                }
+
+                navSetting = navItems.map(function (item) {
+                    var label,
+                        url;
+
+                    if (!item || !item.get('isComplete')) {
+                        return;
+                    }
+
+                    label = item.get('label').trim();
+                    url = item.get('url').trim();
+
+                    // is this an internal URL?
+                    match = url.match(blogUrlRegex);
+
+                    if (match) {
+                        url = match[1];
+
+                        // if the last char is not a slash, then add one,
+                        // as long as there is no # or . in the URL (anchor or file extension)
+                        // this also handles the empty case for the homepage
+                        if (url[url.length - 1] !== '/' && url.indexOf('#') === -1 && url.indexOf('.') === -1) {
+                            url += '/';
+                        }
+                    } else if (!validator.isURL(url) && url !== '' && url[0] !== '/' && url.indexOf('mailto:') !== 0) {
+                        url = '/' + url;
+                    }
+
+                    return {label: label, url: url};
+                }).compact();
+
+                this.set('model.navigation', JSON.stringify(navSetting));
+
+                // trigger change event because even if the final JSON is unchanged
+                // we need to have navigationItems recomputed.
+                this.get('model').notifyPropertyChange('navigation');
+
+                this.notifications.closePassive();
+
+                this.get('model').save().then(function () {
+                    self.notifications.showSuccess('Navigation items saved.');
+                }).catch(function (err) {
+                    self.notifications.showErrors(err);
+                });
+            }
+        }
+    });
+
+    __exports__["default"] = NavigationController;
+  });
 define("ghost/controllers/settings/tags", 
-  ["ghost/mixins/pagination-controller","ghost/utils/bound-one-way","exports"],
-  function(__dependency1__, __dependency2__, __exports__) {
+  ["ghost/mixins/pagination-controller","ghost/mixins/settings-menu-controller","ghost/utils/bound-one-way","exports"],
+  function(__dependency1__, __dependency2__, __dependency3__, __exports__) {
     "use strict";
     var PaginationMixin = __dependency1__["default"];
-    var boundOneWay = __dependency2__["default"];
+    var SettingsMenuMixin = __dependency2__["default"];
+    var boundOneWay = __dependency3__["default"];
 
-    var TagsController = Ember.ArrayController.extend(PaginationMixin, {
+    var TagsController = Ember.ArrayController.extend(PaginationMixin, SettingsMenuMixin, {
         tags: Ember.computed.alias('model'),
-
-        needs: 'application',
 
         activeTag: null,
         activeTagNameScratch: boundOneWay('activeTag.name'),
@@ -3311,18 +3836,6 @@ define("ghost/controllers/settings/tags",
             options.modelType = 'tag';
             this._super(options);
         },
-
-        isViewingSubview: Ember.computed('controllers.application.showSettingsMenu', function (key, value) {
-            // Not viewing a subview if we can't even see the PSM
-            if (!this.get('controllers.application.showSettingsMenu')) {
-                return false;
-            }
-            if (arguments.length > 1) {
-                return value;
-            }
-
-            return false;
-        }),
 
         showErrors: function (errors) {
             errors = Ember.isArray(errors) ? errors : [errors];
@@ -3358,7 +3871,7 @@ define("ghost/controllers/settings/tags",
             if (metaTitle && metaTitle.length > 70) {
                 metaTitle = metaTitle.substring(0, 70).trim();
                 metaTitle = Ember.Handlebars.Utils.escapeExpression(metaTitle);
-                metaTitle = new Ember.Handlebars.SafeString(metaTitle + '&hellip;');
+                metaTitle = Ember.String.htmlSafe(metaTitle + '&hellip;');
             }
 
             return metaTitle;
@@ -3376,7 +3889,7 @@ define("ghost/controllers/settings/tags",
 
             if (seoURL.length > 70) {
                 seoURL = seoURL.substring(0, 70).trim();
-                seoURL = new Ember.Handlebars.SafeString(seoURL + '&hellip;');
+                seoURL = Ember.String.htmlSafe(seoURL + '&hellip;');
             }
 
             return seoURL;
@@ -3390,7 +3903,7 @@ define("ghost/controllers/settings/tags",
             if (metaDescription && metaDescription.length > 156) {
                 metaDescription = metaDescription.substring(0, 156).trim();
                 metaDescription = Ember.Handlebars.Utils.escapeExpression(metaDescription);
-                metaDescription = new Ember.Handlebars.SafeString(metaDescription + '&hellip;');
+                metaDescription = Ember.String.htmlSafe(metaDescription + '&hellip;');
             }
 
             return metaDescription;
@@ -3398,26 +3911,13 @@ define("ghost/controllers/settings/tags",
 
         actions: {
             newTag: function () {
-                this.set('activeTag', this.store.createRecord('tag'));
+                this.set('activeTag', this.store.createRecord('tag', {post_count: 0}));
                 this.send('openSettingsMenu');
             },
 
             editTag: function (tag) {
                 this.set('activeTag', tag);
                 this.send('openSettingsMenu');
-            },
-
-            deleteTag: function (tag) {
-                var name = tag.get('name'),
-                    self = this;
-
-                this.send('closeSettingsMenu');
-
-                tag.destroyRecord().then(function () {
-                    self.notifications.showSuccess('Deleted ' + name);
-                }).catch(function (error) {
-                    self.notifications.showAPIError(error);
-                });
             },
 
             saveActiveTagName: function (name) {
@@ -3438,14 +3938,6 @@ define("ghost/controllers/settings/tags",
 
             saveActiveTagMetaDescription: function (metaDescription) {
                 this.saveActiveTagProperty('meta_description', metaDescription);
-            },
-
-            showSubview: function () {
-                this.set('isViewingSubview', true);
-            },
-
-            closeSubview: function () {
-                this.set('isViewingSubview', false);
             },
 
             setCoverImage: function (image) {
@@ -3496,13 +3988,13 @@ define("ghost/controllers/settings/users/user",
     var isNumber = __dependency2__["default"];
     var boundOneWay = __dependency3__["default"];
 
-    var SettingsUserController = Ember.ObjectController.extend({
+    var SettingsUserController = Ember.Controller.extend({
 
         user: Ember.computed.alias('model'),
 
-        email: Ember.computed.readOnly('user.email'),
+        email: Ember.computed.readOnly('model.email'),
 
-        slugValue: boundOneWay('user.slug'),
+        slugValue: boundOneWay('model.slug'),
 
         lastPromise: null,
 
@@ -3568,7 +4060,7 @@ define("ghost/controllers/settings/users/user",
 
                 // reload the model to get the most up-to-date user information
                 model.reload().then(function () {
-                    if (self.get('invited')) {
+                    if (model.get('invited')) {
                         model.destroyRecord().then(function () {
                             var notificationText = 'Invitation revoked. (' + email + ')';
                             self.notifications.showSuccess(notificationText, false);
@@ -3672,7 +4164,7 @@ define("ghost/controllers/settings/users/user",
                     promise;
 
                 promise = Ember.RSVP.resolve(afterSave).then(function () {
-                    var slug = self.get('slug');
+                    var slug = self.get('model.slug');
 
                     newSlug = newSlug || slug;
 
@@ -3730,7 +4222,7 @@ define("ghost/controllers/setup",
     var ajax = __dependency1__["default"];
     var ValidationEngine = __dependency2__["default"];
 
-    var SetupController = Ember.ObjectController.extend(ValidationEngine, {
+    var SetupController = Ember.Controller.extend(ValidationEngine, {
         blogTitle: null,
         name: null,
         email: null,
@@ -3792,13 +4284,22 @@ define("ghost/controllers/signin",
 
         actions: {
             authenticate: function () {
-                var data = this.getProperties('identification', 'password');
+                var model = this.get('model'),
+                    data = model.getProperties('identification', 'password');
 
-                return this._super(data);
+                this._super(data).catch(function () {
+                    // if authentication fails a rejected promise will be returned.
+                    // it needs to be caught so it doesn't generate an exception in the console,
+                    // but it's actually "handled" by the sessionAuthenticationFailed action handler.
+                });
             },
 
             validateAndAuthenticate: function () {
                 var self = this;
+
+                // Manually trigger events for input fields, ensuring legacy compatibility with
+                // browsers and password managers that don't send proper events on autofill
+                $('#login').find('input').trigger('change');
 
                 this.validate({format: false}).then(function () {
                     self.notifications.closePassive();
@@ -3819,7 +4320,7 @@ define("ghost/controllers/signup",
     var ajax = __dependency1__["default"];
     var ValidationEngine = __dependency2__["default"];
 
-    var SignupController = Ember.ObjectController.extend(ValidationEngine, {
+    var SignupController = Ember.Controller.extend(ValidationEngine, {
         submitting: false,
 
         // ValidationEngine settings
@@ -3828,7 +4329,8 @@ define("ghost/controllers/signup",
         actions: {
             signup: function () {
                 var self = this,
-                    data = self.getProperties('name', 'email', 'password', 'token');
+                    model = this.get('model'),
+                    data = model.getProperties('name', 'email', 'password', 'token');
 
                 self.notifications.closePassive();
 
@@ -3848,8 +4350,8 @@ define("ghost/controllers/signup",
                         }
                     }).then(function () {
                         self.get('session').authenticate('simple-auth-authenticator:oauth2-password-grant', {
-                            identification: self.get('email'),
-                            password: self.get('password')
+                            identification: self.get('model.email'),
+                            password: self.get('model.password')
                         });
                     }, function (resp) {
                         self.toggleProperty('submitting');
@@ -3930,8 +4432,8 @@ define("ghost/helpers/gh-blog-url",
   ["exports"],
   function(__exports__) {
     "use strict";
-    var blogUrl = Ember.Handlebars.makeBoundHelper(function () {
-        return new Ember.Handlebars.SafeString(this.get('config.blogUrl'));
+    var blogUrl = Ember.HTMLBars.makeBoundHelper(function () {
+        return Ember.String.htmlSafe(this.get('config.blogUrl'));
     });
 
     __exports__["default"] = blogUrl;
@@ -3940,9 +4442,17 @@ define("ghost/helpers/gh-count-characters",
   ["exports"],
   function(__exports__) {
     "use strict";
-    var countCharacters = Ember.Handlebars.makeBoundHelper(function (content) {
+    var countCharacters = Ember.HTMLBars.makeBoundHelper(function (arr /* hashParams */) {
         var el = document.createElement('span'),
-            length = content ? content.length : 0;
+            length,
+            content;
+
+        if (!arr || !arr.length) {
+            return;
+        }
+
+        content = arr[0] || '';
+        length = content.length;
 
         el.className = 'word-count';
 
@@ -3954,7 +4464,7 @@ define("ghost/helpers/gh-count-characters",
 
         el.innerHTML = 200 - length;
 
-        return new Ember.Handlebars.SafeString(el.outerHTML);
+        return Ember.String.htmlSafe(el.outerHTML);
     });
 
     __exports__["default"] = countCharacters;
@@ -3963,9 +4473,19 @@ define("ghost/helpers/gh-count-down-characters",
   ["exports"],
   function(__exports__) {
     "use strict";
-    var countDownCharacters = Ember.Handlebars.makeBoundHelper(function (content, maxCharacters) {
+    var countDownCharacters = Ember.HTMLBars.makeBoundHelper(function (arr /* hashParams */) {
         var el = document.createElement('span'),
-            length = content ? content.length : 0;
+            content,
+            maxCharacters,
+            length;
+
+        if (!arr || arr.length < 2) {
+            return;
+        }
+
+        content = arr[0] || '';
+        maxCharacters = arr[1];
+        length = content.length;
 
         el.className = 'word-count';
 
@@ -3977,7 +4497,7 @@ define("ghost/helpers/gh-count-down-characters",
 
         el.innerHTML = length;
 
-        return new Ember.Handlebars.SafeString(el.outerHTML);
+        return Ember.String.htmlSafe(el.outerHTML);
     });
 
     __exports__["default"] = countDownCharacters;
@@ -3988,12 +4508,21 @@ define("ghost/helpers/gh-count-words",
     "use strict";
     var counter = __dependency1__["default"];
 
-    var countWords = Ember.Handlebars.makeBoundHelper(function (markdown) {
+    var countWords = Ember.HTMLBars.makeBoundHelper(function (arr /* hashParams */) {
+        if (!arr || !arr.length) {
+            return;
+        }
+
+        var markdown,
+            count;
+
+        markdown = arr[0] || '';
+
         if (/^\s*$/.test(markdown)) {
             return '0 words';
         }
 
-        var count = counter(markdown || '');
+        count = counter(markdown);
 
         return count + (count === 1 ? ' word' : ' words');
     });
@@ -4004,26 +4533,28 @@ define("ghost/helpers/gh-format-html",
   ["ghost/utils/caja-sanitizers","exports"],
   function(__dependency1__, __exports__) {
     "use strict";
-    /* global Handlebars, html_sanitize*/
+    /* global html_sanitize*/
     var cajaSanitizers = __dependency1__["default"];
 
-    var formatHTML = Ember.Handlebars.makeBoundHelper(function (html) {
-        var escapedhtml = html || '';
+    var formatHTML = Ember.HTMLBars.makeBoundHelper(function (arr /* hashParams */) {
+        if (!arr || !arr.length) {
+            return;
+        }
+
+        var escapedhtml = arr[0] || '';
 
         // replace script and iFrame
-        // jscs:disable
         escapedhtml = escapedhtml.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi,
             '<pre class="js-embed-placeholder">Embedded JavaScript</pre>');
         escapedhtml = escapedhtml.replace(/<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi,
             '<pre class="iframe-embed-placeholder">Embedded iFrame</pre>');
-        // jscs:enable
 
         // sanitize HTML
         // jscs:disable requireCamelCaseOrUpperCaseIdentifiers
         escapedhtml = html_sanitize(escapedhtml, cajaSanitizers.url, cajaSanitizers.id);
         // jscs:enable requireCamelCaseOrUpperCaseIdentifiers
 
-        return new Handlebars.SafeString(escapedhtml);
+        return Ember.String.htmlSafe(escapedhtml);
     });
 
     __exports__["default"] = formatHTML;
@@ -4032,7 +4563,7 @@ define("ghost/helpers/gh-format-markdown",
   ["ghost/utils/caja-sanitizers","exports"],
   function(__dependency1__, __exports__) {
     "use strict";
-    /* global Showdown, Handlebars, html_sanitize*/
+    /* global Showdown, html_sanitize*/
     var cajaSanitizers = __dependency1__["default"];
 
     var showdown,
@@ -4040,26 +4571,29 @@ define("ghost/helpers/gh-format-markdown",
 
     showdown = new Showdown.converter({extensions: ['ghostimagepreview', 'ghostgfm', 'footnotes', 'highlight']});
 
-    formatMarkdown = Ember.Handlebars.makeBoundHelper(function (markdown) {
-        var escapedhtml = '';
+    formatMarkdown = Ember.HTMLBars.makeBoundHelper(function (arr /* hashParams */) {
+        if (!arr || !arr.length) {
+            return;
+        }
+
+        var escapedhtml = '',
+            markdown = arr[0] || '';
 
         // convert markdown to HTML
-        escapedhtml = showdown.makeHtml(markdown || '');
+        escapedhtml = showdown.makeHtml(markdown);
 
         // replace script and iFrame
-        // jscs:disable
         escapedhtml = escapedhtml.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi,
             '<pre class="js-embed-placeholder">Embedded JavaScript</pre>');
         escapedhtml = escapedhtml.replace(/<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi,
             '<pre class="iframe-embed-placeholder">Embedded iFrame</pre>');
-        // jscs:enable
 
         // sanitize html
         // jscs:disable requireCamelCaseOrUpperCaseIdentifiers
         escapedhtml = html_sanitize(escapedhtml, cajaSanitizers.url, cajaSanitizers.id);
         // jscs:enable requireCamelCaseOrUpperCaseIdentifiers
 
-        return new Handlebars.SafeString(escapedhtml);
+        return Ember.String.htmlSafe(escapedhtml);
     });
 
     __exports__["default"] = formatMarkdown;
@@ -4068,8 +4602,13 @@ define("ghost/helpers/gh-format-timeago",
   ["exports"],
   function(__exports__) {
     "use strict";
-    /* global moment */
-    var formatTimeago = Ember.Handlebars.makeBoundHelper(function (timeago) {
+    var formatTimeago = Ember.HTMLBars.makeBoundHelper(function (arr /* hashParams */) {
+        if (!arr || !arr.length) {
+            return;
+        }
+
+        var timeago = arr[0];
+
         return moment(timeago).fromNow();
         // stefanpenner says cool for small number of timeagos.
         // For large numbers moment sucks => single Ember.Object based clock better
@@ -4078,7 +4617,7 @@ define("ghost/helpers/gh-format-timeago",
 
     __exports__["default"] = formatTimeago;
   });
-define("ghost/helpers/ghost-paths", 
+define("ghost/helpers/gh-path", 
   ["ghost/utils/ghost-paths","exports"],
   function(__dependency1__, __exports__) {
     "use strict";
@@ -4131,7 +4670,7 @@ define("ghost/helpers/ghost-paths",
             base = base + url;
         }
 
-        return new Ember.Handlebars.SafeString(base);
+        return Ember.String.htmlSafe(base);
     }
 
     __exports__["default"] = ghostPathsHelper;
@@ -4440,7 +4979,7 @@ define("ghost/mixins/editor-base-controller",
 
     // this array will hold properties we need to watch
     // to know if the model has been changed (`controller.isDirty`)
-    watchedProps = ['scratch', 'titleScratch', 'model.isDirty', 'tags.[]'];
+    watchedProps = ['model.scratch', 'model.titleScratch', 'model.isDirty', 'model.tags.[]'];
 
     PostModel.eachAttribute(function (name) {
         watchedProps.push('model.' + name);
@@ -4448,6 +4987,11 @@ define("ghost/mixins/editor-base-controller",
 
     EditorControllerMixin = Ember.Mixin.create(MarkerManager, {
         needs: ['post-tags-input', 'post-settings-menu'],
+
+        autoSaveId: null,
+        timedSaveId: null,
+        codemirror: null,
+        codemirrorComponent: null,
 
         init: function () {
             var self = this;
@@ -4464,7 +5008,7 @@ define("ghost/mixins/editor-base-controller",
          * Only with a user-set value (via setSaveType action)
          * can the post's status change.
          */
-        willPublish: boundOneWay('isPublished'),
+        willPublish: boundOneWay('model.isPublished'),
 
         // Make sure editor starts with markdown shown
         isPreview: false,
@@ -4473,8 +5017,12 @@ define("ghost/mixins/editor-base-controller",
         // whether the number of tags has changed for `isDirty`.
         previousTagNames: null,
 
-        tagNames: Ember.computed('tags.@each.name', function () {
-            return this.get('tags').mapBy('name');
+        tagNames: Ember.computed('model.tags.@each.name', function () {
+            return this.get('model.tags').mapBy('name');
+        }),
+
+        postOrPage: Ember.computed('model.page', function () {
+            return this.get('model.page') ? 'Page' : 'Post';
         }),
 
         // compares previousTagNames to tagNames
@@ -4514,8 +5062,8 @@ define("ghost/mixins/editor-base-controller",
 
             // if the two "scratch" properties (title and content) match the model, then
             // it's ok to set isDirty to false
-            if (this.get('titleScratch') === model.get('title') &&
-                this.get('scratch') === model.get('markdown')) {
+            if (model.get('titleScratch') === model.get('title') &&
+                model.get('scratch') === model.get('markdown')) {
                 this.set('isDirty', false);
             }
         },
@@ -4528,9 +5076,9 @@ define("ghost/mixins/editor-base-controller",
             }
 
             var model = this.get('model'),
-                markdown = this.get('markdown'),
-                title = this.get('title'),
-                titleScratch = this.get('titleScratch'),
+                markdown = model.get('markdown'),
+                title = model.get('title'),
+                titleScratch = model.get('titleScratch'),
                 scratch = this.getMarkdown().withoutMarkers,
                 changedAttributes;
 
@@ -4615,12 +5163,12 @@ define("ghost/mixins/editor-base-controller",
 
         showSaveNotification: function (prevStatus, status, delay) {
             var message = this.messageMap.success.post[prevStatus][status],
-                path = this.get('ghostPaths.url').join(this.get('config.blogUrl'), this.get('url'));
+                path = this.get('ghostPaths.url').join(this.get('config.blogUrl'), this.get('model.url'));
 
             if (status === 'published') {
-                message += '&nbsp;<a href="' + path + '">View Post</a>';
+                message += '&nbsp;<a href="' + path + '">View ' + this.get('postOrPage') + '</a>';
             }
-            this.notifications.showSuccess(message, {delayed: delay});
+            this.notifications.showSuccess(message.htmlSafe(), {delayed: delay});
         },
 
         showErrorNotification: function (prevStatus, status, errors, delay) {
@@ -4629,7 +5177,7 @@ define("ghost/mixins/editor-base-controller",
 
             message += '<br />' + error;
 
-            this.notifications.showError(message, {delayed: delay});
+            this.notifications.showError(message.htmlSafe(), {delayed: delay});
         },
 
         shouldFocusTitle: Ember.computed.alias('model.isNew'),
@@ -4638,8 +5186,8 @@ define("ghost/mixins/editor-base-controller",
         actions: {
             save: function (options) {
                 var status = this.get('willPublish') ? 'published' : 'draft',
-                    prevStatus = this.get('status'),
-                    isNew = this.get('isNew'),
+                    prevStatus = this.get('model.status'),
+                    isNew = this.get('model.isNew'),
                     autoSaveId = this.get('autoSaveId'),
                     timedSaveId = this.get('timedSaveId'),
                     self = this,
@@ -4665,24 +5213,24 @@ define("ghost/mixins/editor-base-controller",
 
                 // Set the properties that are indirected
                 // set markdown equal to what's in the editor, minus the image markers.
-                this.set('markdown', this.getMarkdown().withoutMarkers);
-                this.set('status', status);
+                this.set('model.markdown', this.getMarkdown().withoutMarkers);
+                this.set('model.status', status);
 
                 // Set a default title
-                if (!this.get('titleScratch').trim()) {
-                    this.set('titleScratch', '(Untitled)');
+                if (!this.get('model.titleScratch').trim()) {
+                    this.set('model.titleScratch', '(Untitled)');
                 }
 
-                this.set('title', this.get('titleScratch'));
-                this.set('meta_title', psmController.get('metaTitleScratch'));
-                this.set('meta_description', psmController.get('metaDescriptionScratch'));
+                this.set('model.title', this.get('model.titleScratch'));
+                this.set('model.meta_title', psmController.get('metaTitleScratch'));
+                this.set('model.meta_description', psmController.get('metaDescriptionScratch'));
 
-                if (!this.get('slug')) {
+                if (!this.get('model.slug')) {
                     // Cancel any pending slug generation that may still be queued in the
                     // run loop because we need to run it before the post is saved.
                     Ember.run.cancel(psmController.get('debounceId'));
 
-                    psmController.generateAndSetSlug('slug');
+                    psmController.generateAndSetSlug('model.slug');
                 }
 
                 promise = Ember.RSVP.resolve(psmController.get('lastPromise')).then(function () {
@@ -4695,10 +5243,10 @@ define("ghost/mixins/editor-base-controller",
                     });
                 }).catch(function (errors) {
                     if (!options.silent) {
-                        self.showErrorNotification(prevStatus, self.get('status'), errors);
+                        self.showErrorNotification(prevStatus, self.get('model.status'), errors);
                     }
 
-                    self.set('status', prevStatus);
+                    self.set('model.status', prevStatus);
 
                     return self.get('model');
                 });
@@ -4743,9 +5291,7 @@ define("ghost/mixins/editor-base-controller",
                 var editor = this.get('codemirror'),
                     line = this.findLine(Ember.$(e.currentTarget).attr('id')),
                     lineNumber = editor.getLineNumber(line),
-                    // jscs:disable
                     match = line.text.match(/\([^\n]*\)?/),
-                    // jscs:enable
                     replacement = '(http://)';
 
                 if (match) {
@@ -4755,9 +5301,7 @@ define("ghost/mixins/editor-base-controller",
                         {line: lineNumber, ch: match.index + match[0].length - 1}
                     );
                 } else {
-                    // jscs:disable
                     match = line.text.match(/\]/);
-                    // jscs:enable
                     if (match) {
                         editor.replaceRange(
                             replacement,
@@ -4792,7 +5336,7 @@ define("ghost/mixins/editor-base-controller",
             },
 
             autoSaveNew: function () {
-                if (this.get('isNew')) {
+                if (this.get('model.isNew')) {
                     this.send('save', {silent: true, disableNProgress: true});
                 }
             }
@@ -4839,7 +5383,7 @@ define("ghost/mixins/editor-base-route",
 
             willTransition: function (transition) {
                 var controller = this.get('controller'),
-                    scratch = controller.get('scratch'),
+                    scratch = controller.get('model.scratch'),
                     controllerIsDirty = controller.get('isDirty'),
                     model = controller.get('model'),
                     state = model.getProperties('isDeleted', 'isSaving', 'isDirty', 'isNew'),
@@ -4919,9 +5463,9 @@ define("ghost/mixins/editor-base-route",
             this._super(controller, model);
             var tags = model.get('tags');
 
-            controller.set('scratch', model.get('markdown'));
+            controller.set('model.scratch', model.get('markdown'));
 
-            controller.set('titleScratch', model.get('title'));
+            controller.set('model.titleScratch', model.get('title'));
 
             if (tags) {
                 // used to check if anything has changed in the editor
@@ -5039,10 +5583,8 @@ define("ghost/mixins/marker-manager",
   function(__exports__) {
     "use strict";
     var MarkerManager = Ember.Mixin.create({
-        // jscs:disable
         imageMarkdownRegex: /^(?:\{<(.*?)>\})?!(?:\[([^\n\]]*)\])(?:\(([^\n\]]*)\))?$/gim,
         markerRegex: /\{<([\w\W]*?)>\}/,
-        // jscs:enable
 
         uploadId: 1,
 
@@ -5204,9 +5746,7 @@ define("ghost/mixins/marker-manager",
             var editor = this.get('codemirror'),
                 ln = editor.getLineNumber(line),
 
-                // jscs:disable
                 markerRegex = /\{<([\w\W]*?)>\}/,
-                // jscs:enable
 
                 markerText = line.text.match(markerRegex);
 
@@ -5298,25 +5838,8 @@ define("ghost/mixins/pagination-controller",
         // set from PaginationRouteMixin
         paginationSettings: null,
 
-        // holds the next page to load during infinite scroll
-        nextPage: null,
-
         // indicates whether we're currently loading the next page
         isLoading: null,
-
-        /**
-         *
-         * @param {object} options: {
-         *                      modelType: <String> name of the model that will be paginated
-         *                  }
-         */
-        init: function (options) {
-            this._super(options);
-
-            var metadata = this.store.metadataFor(options.modelType);
-
-            this.set('nextPage', metadata.pagination.next);
-        },
 
         /**
          * Takes an ajax response, concatenates any error messages, then generates an error notification.
@@ -5345,7 +5868,8 @@ define("ghost/mixins/pagination-controller",
                 var self = this,
                     store = this.get('store'),
                     recordType = this.get('model').get('type'),
-                    nextPage = this.get('nextPage'),
+                    metadata = this.store.metadataFor(recordType),
+                    nextPage = metadata.pagination && metadata.pagination.next,
                     paginationSettings = this.get('paginationSettings');
 
                 if (nextPage) {
@@ -5353,14 +5877,16 @@ define("ghost/mixins/pagination-controller",
                     this.set('paginationSettings.page', nextPage);
 
                     store.find(recordType, paginationSettings).then(function () {
-                        var metadata = store.metadataFor(recordType);
-
-                        self.set('nextPage', metadata.pagination.next);
                         self.set('isLoading', false);
                     }, function (response) {
                         self.reportLoadError(response);
                     });
                 }
+            },
+
+            resetPagination: function () {
+                this.set('paginationSettings.page', 1);
+                this.store.metaForType('tag', {pagination: undefined});
             }
         }
     });
@@ -5429,9 +5955,14 @@ define("ghost/mixins/pagination-view-infinite-scroll",
          * Bind to the scroll event once the element is in the DOM
          */
         attachCheckScroll: function () {
-            var el = this.$();
+            var el = this.$(),
+                controller = this.get('controller');
 
             el.on('scroll', Ember.run.bind(this, this.checkScroll));
+
+            if (this.element.scrollHeight <= this.element.clientHeight) {
+                controller.send('loadNextPage');
+            }
         }.on('didInsertElement'),
 
         /**
@@ -5570,6 +6101,38 @@ define("ghost/mixins/selective-save",
     });
 
     __exports__["default"] = SelectiveSaveMixin;
+  });
+define("ghost/mixins/settings-menu-controller", 
+  ["exports"],
+  function(__exports__) {
+    "use strict";
+    var SettingsMenuControllerMixin = Ember.Mixin.create({
+        needs: 'application',
+
+        isViewingSubview: Ember.computed('controllers.application.showSettingsMenu', function (key, value) {
+            // Not viewing a subview if we can't even see the PSM
+            if (!this.get('controllers.application.showSettingsMenu')) {
+                return false;
+            }
+            if (arguments.length > 1) {
+                return value;
+            }
+
+            return false;
+        }),
+
+        actions: {
+            showSubview: function () {
+                this.set('isViewingSubview', true);
+            },
+
+            closeSubview: function () {
+                this.set('isViewingSubview', false);
+            }
+        }
+    });
+
+    __exports__["default"] = SettingsMenuControllerMixin;
   });
 define("ghost/mixins/shortcuts-route", 
   ["exports"],
@@ -5761,12 +6324,15 @@ define("ghost/mixins/validation-engine",
             // get the validator's error messages from the array.
             // normalize array members to map to strings.
             message = errors.map(function (error) {
+                var errorMessage;
                 if (typeof error === 'string') {
-                    return error;
+                    errorMessage = error;
+                } else {
+                    errorMessage = error.message;
                 }
 
-                return error.message;
-            }).join('<br />');
+                return Ember.Handlebars.Utils.escapeExpression(errorMessage);
+            }).join('<br />').htmlSafe();
         } else if (errors instanceof Error) {
             message += errors.message || '.';
         } else if (typeof errors === 'object') {
@@ -5821,11 +6387,24 @@ define("ghost/mixins/validation-engine",
         *                   the class that mixes in this mixin.
         */
         validate: function (opts) {
-            var model = opts.model || this,
-                type = this.get('validationType'),
-                validator = this.get('validators.' + type);
-
+            // jscs:disable safeContextKeyword
             opts = opts || {};
+
+            var model = this,
+                type,
+                validator;
+
+            if (opts.model) {
+                model = opts.model;
+            } else if (this instanceof DS.Model) {
+                model = this;
+            } else if (this.get('model')) {
+                model = this.get('model');
+            }
+
+            type = this.get('validationType') || model.get('validationType');
+            validator = this.get('validators.' + type) || model.get('validators.' + type);
+
             opts.validationType = type;
 
             return new Ember.RSVP.Promise(function (resolve, reject) {
@@ -5932,10 +6511,16 @@ define("ghost/models/post",
         author: DS.belongsTo('user',  {async: true}),
         author_id: DS.attr('number'),
         updated_at: DS.attr('moment-date'),
+        updated_by: DS.attr(),
         published_at: DS.attr('moment-date'),
         published_by: DS.belongsTo('user', {async: true}),
+        created_at: DS.attr('moment-date'),
+        created_by: DS.attr(),
         tags: DS.hasMany('tag', {embedded: 'always'}),
         url: DS.attr('string'),
+
+        scratch: null,
+        titleScratch: null,
 
         // Computed post properties
 
@@ -5971,6 +6556,8 @@ define("ghost/models/role",
         description: DS.attr('string'),
         created_at: DS.attr('moment-date'),
         updated_at: DS.attr('moment-date'),
+        created_by: DS.attr(),
+        updated_by: DS.attr(),
 
         lowerCaseName: Ember.computed('name', function () {
             return this.get('name').toLocaleLowerCase();
@@ -6001,7 +6588,9 @@ define("ghost/models/setting",
         activeTheme: DS.attr('string'),
         availableThemes: DS.attr(),
         ghost_head: DS.attr('string'),
-        ghost_foot: DS.attr('string')
+        ghost_foot: DS.attr('string'),
+        labs: DS.attr('string'),
+        navigation: DS.attr('string')
     });
 
     __exports__["default"] = Setting;
@@ -6053,10 +6642,16 @@ define("ghost/models/tag",
         name: DS.attr('string'),
         slug: DS.attr('string'),
         description: DS.attr('string'),
-        parent_id: DS.attr('number'),
+        parent: DS.attr(),
         meta_title: DS.attr('string'),
         meta_description: DS.attr('string'),
-        image: DS.attr('string')
+        image: DS.attr('string'),
+        hidden: DS.attr('boolean'),
+        created_at: DS.attr('moment-date'),
+        updated_at: DS.attr('moment-date'),
+        created_by: DS.attr(),
+        updated_by: DS.attr(),
+        post_count: DS.attr('number')
     });
 
     __exports__["default"] = Tag;
@@ -6218,6 +6813,7 @@ define("ghost/router",
             this.route('tags');
             this.route('labs');
             this.route('code-injection');
+            this.route('navigation');
         });
 
         // Redirect debug to settings labs
@@ -6292,6 +6888,11 @@ define("ghost/routes/application",
 
             sessionAuthenticationFailed: function (error) {
                 if (error.errors) {
+                    // These are server side errors, which can be marked as htmlSafe
+                    error.errors.forEach(function (err) {
+                        err.message = err.message.htmlSafe();
+                    });
+
                     this.notifications.showErrors(error.errors);
                 } else {
                     // connection errors don't return proper status message, only req.body
@@ -6532,8 +7133,9 @@ define("ghost/routes/editor/new",
             // from previous posts
             psm.removeObserver('titleScratch', psm, 'titleObserver');
 
-            // Ensure that the PSM Image Uploader resets
+            // Ensure that the PSM Image Uploader and Publish Date selector resets
             psm.send('resetUploader');
+            psm.send('resetPubDate');
 
             this._super(controller, model);
         }
@@ -6982,9 +7584,24 @@ define("ghost/routes/settings/code-injection",
         classNames: ['settings-view-code'],
 
         beforeModel: function () {
+            var feature = this.controllerFor('feature'),
+                self = this;
+
+            if (!feature) {
+                this.generateController('feature');
+                feature = this.controllerFor('feature');
+            }
+
             return this.currentUser()
                 .then(this.transitionAuthor())
-                .then(this.transitionEditor());
+                .then(this.transitionEditor())
+                .then(function () {
+                    return feature.then(function () {
+                        if (!feature.get('codeInjectionUI')) {
+                            return self.transitionTo('settings.general');
+                        }
+                    });
+                });
         },
 
         model: function () {
@@ -7098,6 +7715,43 @@ define("ghost/routes/settings/labs",
 
     __exports__["default"] = LabsRoute;
   });
+define("ghost/routes/settings/navigation", 
+  ["ghost/routes/authenticated","ghost/mixins/current-user-settings","ghost/mixins/style-body","exports"],
+  function(__dependency1__, __dependency2__, __dependency3__, __exports__) {
+    "use strict";
+    var AuthenticatedRoute = __dependency1__["default"];
+    var CurrentUserSettings = __dependency2__["default"];
+    var styleBody = __dependency3__["default"];
+
+    var NavigationRoute = AuthenticatedRoute.extend(styleBody, CurrentUserSettings, {
+
+        titleToken: 'Navigation',
+
+        classNames: ['settings-view-navigation'],
+
+        beforeModel: function () {
+            return this.currentUser().then(this.transitionAuthor());
+        },
+
+        model: function () {
+            return this.store.find('setting', {type: 'blog,theme'}).then(function (records) {
+                return records.get('firstObject');
+            });
+        },
+
+        actions: {
+            save: function () {
+                // since shortcuts are run on the route, we have to signal to the components
+                // on the page that we're about to save.
+                $('.page-actions .btn-blue').focus();
+
+                this.get('controller').send('save');
+            }
+        }
+    });
+
+    __exports__["default"] = NavigationRoute;
+  });
 define("ghost/routes/settings/tags", 
   ["ghost/routes/authenticated","ghost/mixins/current-user-settings","ghost/mixins/pagination-route","exports"],
   function(__dependency1__, __dependency2__, __dependency3__, __exports__) {
@@ -7106,8 +7760,16 @@ define("ghost/routes/settings/tags",
     var CurrentUserSettings = __dependency2__["default"];
     var PaginationRouteMixin = __dependency3__["default"];
 
-    var TagsRoute = AuthenticatedRoute.extend(CurrentUserSettings, PaginationRouteMixin, {
+    var TagsRoute,
+        paginationSettings;
 
+    paginationSettings = {
+        page: 1,
+        include: 'post_count',
+        limit: 15
+    };
+
+    TagsRoute = AuthenticatedRoute.extend(CurrentUserSettings, PaginationRouteMixin, {
         actions: {
             willTransition: function () {
                 this.send('closeSettingsMenu');
@@ -7117,21 +7779,21 @@ define("ghost/routes/settings/tags",
         titleToken: 'Tags',
 
         beforeModel: function () {
-            if (!this.get('config.tagsUI')) {
-                return this.transitionTo('settings.general');
-            }
-
             return this.currentUser()
                 .then(this.transitionAuthor());
         },
 
         model: function () {
-            return this.store.find('tag');
+            this.store.unloadAll('tag');
+
+            return this.store.filter('tag', paginationSettings, function (tag) {
+                return !tag.get('isNew');
+            });
         },
 
         setupController: function (controller, model) {
             this._super(controller, model);
-            this.setupPagination();
+            this.setupPagination(paginationSettings);
         },
 
         renderTemplate: function (controller, model) {
@@ -7141,6 +7803,10 @@ define("ghost/routes/settings/tags",
                 outlet: 'settings-menu',
                 view: 'settings/tags/settings-menu'
             });
+        },
+
+        deactivate: function () {
+            this.controller.send('resetPagination');
         }
     });
 
@@ -7338,13 +8004,22 @@ define("ghost/routes/signin",
             }
         },
 
+        model: function () {
+            return Ember.Object.create({
+                identification: '',
+                password: ''
+            });
+        },
+
         // the deactivate hook is called after a route has been exited.
         deactivate: function () {
             this._super();
 
-            // clear the properties that hold the credentials from the controller
-            // when we're no longer on the signin screen
-            this.controllerFor('signin').setProperties({identification: '', password: ''});
+            var controller = this.controllerFor('signin');
+
+            // clear the properties that hold the credentials when we're no longer on the signin screen
+            controller.set('model.identification', '');
+            controller.set('model.password', '');
         }
     });
 
@@ -7396,7 +8071,7 @@ define("ghost/routes/signup",
             var self = this,
                 tokenText,
                 email,
-                model = {},
+                model = Ember.Object.create(),
                 re = /^(?:[A-Za-z0-9_\-]{4})*(?:[A-Za-z0-9_\-]{2}|[A-Za-z0-9_\-]{3})?$/;
 
             return new Ember.RSVP.Promise(function (resolve) {
@@ -7409,8 +8084,8 @@ define("ghost/routes/signup",
                 tokenText = atob(params.token);
                 email = tokenText.split('|')[1];
 
-                model.email = email;
-                model.token = params.token;
+                model.set('email', email);
+                model.set('token', params.token);
 
                 return ic.ajax.request({
                     url: self.get('ghostPaths.url').api('authentication', 'invitation'),
@@ -7502,23 +8177,9 @@ define("ghost/serializers/post",
             return this._super.apply(this, arguments);
         },
 
-        keyForAttribute: function (attr) {
-            return attr;
-        },
-
-        keyForRelationship: function (relationshipName) {
-            // this is a hack to prevent Ember-Data from deleting our `tags` reference.
-            // ref: https://github.com/emberjs/data/issues/2051
-            // @TODO: remove this once the situation becomes clearer what to do.
-            if (relationshipName === 'tags') {
-                return 'tag';
-            }
-
-            return relationshipName;
-        },
-
         serializeIntoHash: function (hash, type, record, options) {
             options = options || {};
+            options.includeId = true;
 
             // We have a plural root in the API
             var root = Ember.String.pluralize(type.typeKey),
@@ -7581,6 +8242,31 @@ define("ghost/serializers/setting",
 
     __exports__["default"] = SettingSerializer;
   });
+define("ghost/serializers/tag", 
+  ["ghost/serializers/application","exports"],
+  function(__dependency1__, __exports__) {
+    "use strict";
+    var ApplicationSerializer = __dependency1__["default"];
+
+    var TagSerializer = ApplicationSerializer.extend({
+        serializeIntoHash: function (hash, type, record, options) {
+            options = options || {};
+            options.includeId = true;
+
+            var root = Ember.String.pluralize(type.typeKey),
+                data = this.serialize(record, options);
+
+            // Properties that exist on the model but we don't want sent in the payload
+
+            delete data.uuid;
+            delete data.post_count;
+
+            hash[root] = [data];
+        }
+    });
+
+    __exports__["default"] = TagSerializer;
+  });
 define("ghost/serializers/user", 
   ["ghost/serializers/application","exports"],
   function(__dependency1__, __exports__) {
@@ -7600,21 +8286,6 @@ define("ghost/serializers/user",
             delete payload[pluralizedRoot];
 
             return this._super.apply(this, arguments);
-        },
-
-        keyForAttribute: function (attr) {
-            return attr;
-        },
-
-        keyForRelationship: function (relationshipName) {
-            // this is a hack to prevent Ember-Data from deleting our `tags` reference.
-            // ref: https://github.com/emberjs/data/issues/2051
-            // @TODO: remove this once the situation becomes clearer what to do.
-            if (relationshipName === 'roles') {
-                return 'role';
-            }
-
-            return relationshipName;
         }
     });
 
@@ -7647,7 +8318,7 @@ define("ghost/utils/ajax",
     "use strict";
     /* global ic */
 
-    var ajax = window.ajax = function () {
+    var ajax = function () {
         return ic.ajax.request.apply(null, arguments);
     };
 
@@ -7760,12 +8431,10 @@ define("ghost/utils/caja-sanitizers",
      * URLs are allowed if they start with http://, https://, or /.
      */
     url = function (url) {
-        // jscs:disable
         url = url.toString().replace(/['"]+/g, '');
         if (/^https?:\/\//.test(url) || /^\//.test(url)) {
             return url;
         }
-        // jscs:enable
     };
 
     /**
@@ -7885,9 +8554,7 @@ define("ghost/utils/codemirror-shortcuts",
 
                 hashPrefix = new Array(currentHeaderLevel + 2).join('#');
 
-                // jscs:disable
                 replacementLine = hashPrefix + ' ' + line.replace(/^#* /, '');
-                // jscs:enable
 
                 this.replaceRange(replacementLine, fromLineStart, toLineEnd);
                 this.setCursor(cursor.line, cursor.ch + replacementLine.length);
@@ -7922,9 +8589,7 @@ define("ghost/utils/codemirror-shortcuts",
                 return;
 
             case 'list':
-                // jscs:disable
                 md = text.replace(/^(\s*)(\w\W*)/gm, '$1* $2');
-                // jscs:enable
                 this.replaceSelection(md, 'end');
                 return;
 
@@ -8296,7 +8961,7 @@ define("ghost/utils/link-view",
   function() {
     "use strict";
     Ember.LinkView.reopen({
-        active: Ember.computed('resolvedParams', 'routeArgs', function () {
+        active: Ember.computed('loadedParams', 'resolvedParams', 'routeArgs', function () {
             var isActive = this._super();
 
             Ember.set(this, 'alternateActive', isActive);
@@ -8348,8 +9013,19 @@ define("ghost/utils/notifications",
             this._super(object);
         },
         handleNotification: function (message, delayed) {
-            if (!message.status) {
-                message.status = 'passive';
+            if (typeof message.toJSON === 'function') {
+                // If this is a persistent message from the server, treat it as html safe
+                if (message.get('status') === 'persistent') {
+                    message.set('message', message.get('message').htmlSafe());
+                }
+
+                if (!message.get('status')) {
+                    message.set('status', 'passive');
+                }
+            } else {
+                if (!message.status) {
+                    message.status = 'passive';
+                }
             }
 
             if (!delayed) {
@@ -8549,12 +9225,14 @@ define("ghost/utils/word-count",
     "use strict";
     // jscs: disable
     function wordCount(s) {
-        s = s.replace(/(^\s*)|(\s*$)/gi, ''); // exclude  start and end white-space
-        s = s.replace(/[ ]{2,}/gi, ' '); // 2 or more space to 1
-        s = s.replace(/\n /gi, '\n'); // exclude newline with a start spacing
-        s = s.replace(/\n+/gi, '\n');
+        s = s.replace(/<(.|\n)*?>/g, ' '); // strip tags
+        s = s.replace(/[^\w\s]/g, ''); // ignore non-alphanumeric letters
+        s = s.replace(/(^\s*)|(\s*$)/gi, ''); // exclude starting and ending white-space
+        s = s.replace(/\n /gi, ' '); // convert newlines to spaces
+        s = s.replace(/\n+/gi, ' ');
+        s = s.replace(/[ ]{2,}/gi, ' '); // convert 2 or more spaces to 1
 
-        return s.split(/ |\n/).length;
+        return s.split(' ').length;
     }
 
     __exports__["default"] = wordCount;
@@ -8872,43 +9550,59 @@ define("ghost/validators/user",
     __exports__["default"] = UserValidator;
   });
 define("ghost/views/application", 
-  ["ghost/utils/mobile","ghost/utils/bind","exports"],
-  function(__dependency1__, __dependency2__, __exports__) {
+  ["ghost/utils/mobile","exports"],
+  function(__dependency1__, __exports__) {
     "use strict";
     var mobileQuery = __dependency1__["default"];
-    var bind = __dependency2__["default"];
 
     var ApplicationView = Ember.View.extend({
         elementId: 'container',
 
-        setupGlobalMobileNav: function () {
+        didInsertElement: function () {
             // #### Navigating within the sidebar closes it.
             var self = this;
+
             $('body').on('click tap', '.js-nav-item', function () {
-                if (mobileQuery.matches) {
-                    self.set('controller.showGlobalMobileNav', false);
-                }
+                Ember.run(function () {
+                    if (mobileQuery.matches) {
+                        self.set('controller.showGlobalMobileNav', false);
+                    }
+                });
             });
 
             // #### Close the nav if mobile and clicking outside of the nav or not the burger toggle
             $('.js-nav-cover').on('click tap', function () {
-                var isOpen = self.get('controller.showGlobalMobileNav');
-                if (isOpen) {
-                    self.set('controller.showGlobalMobileNav', false);
-                }
+                Ember.run(function () {
+                    var isOpen = self.get('controller.showGlobalMobileNav');
+
+                    if (isOpen) {
+                        self.set('controller.showGlobalMobileNav', false);
+                    }
+                });
             });
 
-            // #### Listen to the viewport and change user-menu dropdown triangle classes accordingly
-            mobileQuery.addListener(this.swapUserMenuDropdownTriangleClasses);
-            this.swapUserMenuDropdownTriangleClasses(mobileQuery);
-        }.on('didInsertElement'),
-
-        swapUserMenuDropdownTriangleClasses: function (mq) {
-            if (mq.matches) {
-                $('.js-user-menu-dropdown-menu').removeClass('dropdown-triangle-top-right ').addClass('dropdown-triangle-bottom');
-            } else {
-                $('.js-user-menu-dropdown-menu').removeClass('dropdown-triangle-bottom').addClass('dropdown-triangle-top-right');
+            function swapUserMenuDropdownTriangleClasses(mq) {
+                if (mq.matches) {
+                    $('.js-user-menu-dropdown-menu').removeClass('dropdown-triangle-top-right ').addClass('dropdown-triangle-bottom');
+                } else {
+                    $('.js-user-menu-dropdown-menu').removeClass('dropdown-triangle-bottom').addClass('dropdown-triangle-top-right');
+                }
             }
+
+            // #### Listen to the viewport and change user-menu dropdown triangle classes accordingly
+            this.set('swapUserMenuDropdownTriangleClasses', Ember.run.bind(this, swapUserMenuDropdownTriangleClasses));
+
+            mobileQuery.addListener(this.get('swapUserMenuDropdownTriangleClasses'));
+            swapUserMenuDropdownTriangleClasses(mobileQuery);
+
+            this.set('closeGlobalMobileNavOnDesktop', Ember.run.bind(this, function closeGlobalMobileNavOnDesktop(mq) {
+                if (!mq.matches) {
+                    // Is desktop sized
+                    this.set('controller.showGlobalMobileNav', false);
+                }
+            }));
+
+            mobileQuery.addListener(this.get('closeGlobalMobileNavOnDesktop'));
         },
 
         showGlobalMobileNavObserver: function () {
@@ -8919,20 +9613,10 @@ define("ghost/views/application",
             }
         }.observes('controller.showGlobalMobileNav'),
 
-        setupCloseNavOnDesktop: function () {
-            this.set('closeGlobalMobileNavOnDesktop', bind(function closeGlobalMobileNavOnDesktop(mq) {
-                if (!mq.matches) {
-                    // Is desktop sized
-                    this.set('controller.showGlobalMobileNav', false);
-                }
-            }, this));
-
-            mobileQuery.addListener(this.closeGlobalMobileNavOnDesktop);
-        }.on('didInsertElement'),
-
-        removeCloseNavOnDesktop: function () {
-            mobileQuery.removeListener(this.closeGlobalMobileNavOnDesktop);
-        }.on('willDestroyElement'),
+        willDestroyElement: function () {
+            mobileQuery.removeListener(this.get('closeGlobalMobileNavOnDesktop'));
+            mobileQuery.removeListener(this.get('swapUserMenuDropdownTriangleClasses'));
+        },
 
         toggleSettingsMenuBodyClass: function () {
             $('body').toggleClass('settings-menu-expanded', this.get('controller.showSettingsMenu'));
@@ -8980,16 +9664,20 @@ define("ghost/views/editor-save-button",
         classNames: ['splitbtn', 'js-publish-splitbutton'],
 
         // Tracks whether we're going to change the state of the post on save
-        isDangerous: Ember.computed('controller.isPublished', 'controller.willPublish', function () {
-            return this.get('controller.isPublished') !== this.get('controller.willPublish');
+        isDangerous: Ember.computed('controller.model.isPublished', 'controller.willPublish', function () {
+            return this.get('controller.model.isPublished') !== this.get('controller.willPublish');
         }),
 
-        publishText: Ember.computed('controller.isPublished', function () {
-            return this.get('controller.isPublished') ? 'Update Post' : 'Publish Now';
+        publishText: Ember.computed('controller.model.isPublished', 'controller.pageOrPost', function () {
+            return this.get('controller.model.isPublished') ? 'Update ' + this.get('controller.postOrPage') : 'Publish Now';
         }),
 
-        draftText: Ember.computed('controller.isPublished', function () {
-            return this.get('controller.isPublished') ? 'Unpublish' : 'Save Draft';
+        draftText: Ember.computed('controller.model.isPublished', function () {
+            return this.get('controller.model.isPublished') ? 'Unpublish' : 'Save Draft';
+        }),
+
+        deleteText: Ember.computed('controller.postOrPage', function () {
+            return 'Delete ' + this.get('controller.postOrPage');
         }),
 
         saveText: Ember.computed('controller.willPublish', function () {
@@ -9025,20 +9713,6 @@ define("ghost/views/editor/new",
     });
 
     __exports__["default"] = EditorNewView;
-  });
-define("ghost/views/item-view", 
-  ["exports"],
-  function(__exports__) {
-    "use strict";
-    var ItemView = Ember.View.extend({
-        classNameBindings: ['active'],
-
-        active: Ember.computed('childViews.firstObject.active', function () {
-            return this.get('childViews.firstObject.active');
-        })
-    });
-
-    __exports__["default"] = ItemView;
   });
 define("ghost/views/mobile/content-view", 
   ["ghost/utils/mobile","exports"],
@@ -9136,13 +9810,13 @@ define("ghost/views/paginated-scroll-box",
     __exports__["default"] = PaginatedScrollBox;
   });
 define("ghost/views/post-item-view", 
-  ["ghost/views/item-view","exports"],
-  function(__dependency1__, __exports__) {
+  ["exports"],
+  function(__exports__) {
     "use strict";
-    var itemView = __dependency1__["default"];
+    var PostItemView = Ember.View.extend({
+        classNameBindings: ['active', 'isFeatured:featured', 'isPage:page'],
 
-    var PostItemView = itemView.extend({
-        classNameBindings: ['isFeatured:featured', 'isPage:page'],
+        active: null,
 
         isFeatured: Ember.computed.alias('controller.model.featured'),
 
@@ -9192,25 +9866,6 @@ define("ghost/views/post-item-view",
 
     __exports__["default"] = PostItemView;
   });
-define("ghost/views/post-settings-menu", 
-  ["ghost/utils/date-formatting","exports"],
-  function(__dependency1__, __exports__) {
-    "use strict";
-    /* global moment */
-    var formatDate = __dependency1__.formatDate;
-
-    var PostSettingsMenuView = Ember.View.extend({
-        templateName: 'post-settings-menu',
-
-        publishedAtBinding: Ember.Binding.oneWay('controller.publishedAt'),
-
-        datePlaceholder: Ember.computed('controller.publishedAt', function () {
-            return formatDate(moment());
-        })
-    });
-
-    __exports__["default"] = PostSettingsMenuView;
-  });
 define("ghost/views/post-tags-input", 
   ["exports"],
   function(__exports__) {
@@ -9220,8 +9875,6 @@ define("ghost/views/post-tags-input",
         elementId: 'entry-tags',
         classNames: 'publish-bar-inner',
         classNameBindings: ['hasFocus:focused'],
-
-        templateName: 'post-tags-input',
 
         hasFocus: false,
 
@@ -9513,6 +10166,46 @@ define("ghost/views/settings/labs",
 
     __exports__["default"] = SettingsLabsView;
   });
+define("ghost/views/settings/navigation", 
+  ["ghost/views/settings/content-base","exports"],
+  function(__dependency1__, __exports__) {
+    "use strict";
+    var BaseView = __dependency1__["default"];
+
+    var SettingsNavigationView = BaseView.extend({
+
+        didInsertElement: function () {
+            var navContainer = Ember.$('.js-settings-navigation'),
+                navElements = '.navigation-item:not(.navigation-item:last-child)',
+                self = this;
+
+            navContainer.sortable({
+                handle: '.navigation-item-drag-handle',
+                items: navElements,
+
+                start: function (event, ui) {
+                    Ember.run(function () {
+                        ui.item.data('start-index', ui.item.index());
+                    });
+                },
+
+                update: function (event, ui) {
+                    Ember.run(function () {
+                        self.get('controller').send('moveItem', ui.item.data('start-index'), ui.item.index());
+                        ui.item.remove();
+                    });
+                }
+            });
+        },
+
+        willDestroyElement: function () {
+            Ember.$('.js-settings-navigation').sortable('destroy');
+        }
+
+    });
+
+    __exports__["default"] = SettingsNavigationView;
+  });
 define("ghost/views/settings/tags", 
   ["ghost/views/settings/content-base","ghost/mixins/pagination-view-infinite-scroll","exports"],
   function(__dependency1__, __dependency2__, __exports__) {
@@ -9545,7 +10238,7 @@ define("ghost/views/settings/tags/settings-menu",
                 if (image) {
                     uploader[0].uploaderUi.initWithImage();
                 } else {
-                    uploader[0].uploaderUi.initWithDropzone();
+                    uploader[0].uploaderUi.reset();
                 }
             }
         })
@@ -9603,2678 +10296,12035 @@ define("ghost/views/settings/users/users-list-view",
     var PaginationViewMixin = __dependency1__["default"];
 
     var UsersListView = Ember.View.extend(PaginationViewMixin, {
-        classNames: ['settings-users']
+        classNames: ['js-users-list-view']
     });
 
     __exports__["default"] = UsersListView;
   });
-define('ghost/templates/-contributors', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', helper, options, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression;
-
-
-  data.buffer.push("<li>\n	<a href=\"https://github.com/ErisDS\" title=\"ErisDS\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/ErisDS\" alt=\"ErisDS\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/PaulAdamDavis\" title=\"PaulAdamDavis\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/PaulAdamDavis\" alt=\"PaulAdamDavis\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/JohnONolan\" title=\"JohnONolan\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/JohnONolan\" alt=\"JohnONolan\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/halfdan\" title=\"halfdan\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/halfdan\" alt=\"halfdan\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/jaswilli\" title=\"jaswilli\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/jaswilli\" alt=\"jaswilli\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/felixrieseberg\" title=\"felixrieseberg\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/felixrieseberg\" alt=\"felixrieseberg\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/novaugust\" title=\"novaugust\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/novaugust\" alt=\"novaugust\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/sebgie\" title=\"sebgie\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/sebgie\" alt=\"sebgie\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/hswolff\" title=\"hswolff\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/hswolff\" alt=\"hswolff\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/rwjblue\" title=\"rwjblue\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/rwjblue\" alt=\"rwjblue\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/javorszky\" title=\"javorszky\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/javorszky\" alt=\"javorszky\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/cobbspur\" title=\"cobbspur\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/cobbspur\" alt=\"cobbspur\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/jillesme\" title=\"jillesme\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/jillesme\" alt=\"jillesme\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/morficus\" title=\"morficus\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/morficus\" alt=\"morficus\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/SiR-DanieL\" title=\"SiR-DanieL\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/SiR-DanieL\" alt=\"SiR-DanieL\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/mattiascibien\" title=\"mattiascibien\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/mattiascibien\" alt=\"mattiascibien\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/wjake\" title=\"wjake\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/wjake\" alt=\"wjake\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/shindakun\" title=\"shindakun\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/shindakun\" alt=\"shindakun\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/IanMitchell\" title=\"IanMitchell\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/IanMitchell\" alt=\"IanMitchell\">\n	</a>\n</li>\n<li>\n	<a href=\"https://github.com/iBotPeaches\" title=\"iBotPeaches\">\n		<img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/contributors", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/contributors", options))));
-  data.buffer.push("/iBotPeaches\" alt=\"iBotPeaches\">\n	</a>\n</li>");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/-import-errors', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, self=this;
-
-function program1(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n<table class=\"table\">\n");
-  stack1 = helpers.each.call(depth0, "error", "in", "importErrors", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(2, program2, data),contexts:[depth0,depth0,depth0],types:["ID","ID","ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n</table>\n");
-  return buffer;
-  }
-function program2(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n    <tr><td>");
-  stack1 = helpers._triageMustache.call(depth0, "error.message", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</td></tr>\n");
-  return buffer;
-  }
-
-  stack1 = helpers['if'].call(depth0, "importErrors", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/-navbar', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, self=this, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression;
-
-function program1(depth0,data) {
-  
-  
-  data.buffer.push("\n        <div class=\"nav-label\"><i class=\"icon-content\"></i> Content</div>\n    ");
-  }
-
-function program3(depth0,data) {
-  
-  
-  data.buffer.push("\n        <div class=\"nav-label\"><i class=\"icon-add\"></i> New Post</div>\n    ");
-  }
-
-function program5(depth0,data) {
-  
-  var buffer = '', stack1, helper, options;
-  data.buffer.push("\n    ");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'classNames': ("nav-item nav-settings js-nav-item")
-  },hashTypes:{'classNames': "STRING"},hashContexts:{'classNames': depth0},inverse:self.noop,fn:self.program(6, program6, data),contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "settings", options) : helperMissing.call(depth0, "link-to", "settings", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    ");
-  return buffer;
-  }
-function program6(depth0,data) {
-  
-  
-  data.buffer.push("\n        <div class=\"nav-label\"><i class=\"icon-settings2\"></i> Settings</div>\n    ");
-  }
-
-function program8(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n            ");
-  stack1 = helpers['if'].call(depth0, "session.user.image", {hash:{},hashTypes:{},hashContexts:{},inverse:self.program(11, program11, data),fn:self.program(9, program9, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n            <div class=\"name\">\n                ");
-  stack1 = helpers._triageMustache.call(depth0, "session.user.name", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push(" <i class=\"icon-chevron-down\"></i>\n                <small>Profile &amp; Settings</small>\n            </div>\n        ");
-  return buffer;
-  }
-function program9(depth0,data) {
-  
-  var buffer = '';
-  data.buffer.push("\n            <div class=\"image\"><img ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'src': ("session.user.image"),
-    'alt': ("userImageAlt")
-  },hashTypes:{'src': "ID",'alt': "ID"},hashContexts:{'src': depth0,'alt': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(" /></div>\n            ");
-  return buffer;
-  }
-
-function program11(depth0,data) {
-  
-  var buffer = '', helper, options;
-  data.buffer.push("\n            <div class=\"image\"><img src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "blog", "shared/img/user-image.png", options) : helperMissing.call(depth0, "gh-path", "blog", "shared/img/user-image.png", options))));
-  data.buffer.push("\" alt=\"Profile picture\" /></div>\n            ");
-  return buffer;
-  }
-
-function program13(depth0,data) {
-  
-  var buffer = '', stack1, helper, options;
-  data.buffer.push("\n            <ul class=\"dropdown-menu dropdown-triangle-top-right js-user-menu-dropdown-menu\" role=\"menu\">\n                <li role=\"presentation\">");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'classNames': ("dropdown-item user-menu-profile js-nav-item"),
-    'role': ("menuitem"),
-    'tabindex': ("-1")
-  },hashTypes:{'classNames': "STRING",'role': "STRING",'tabindex': "STRING"},hashContexts:{'classNames': depth0,'role': depth0,'tabindex': depth0},inverse:self.noop,fn:self.program(14, program14, data),contexts:[depth0,depth0],types:["STRING","ID"],data:data},helper ? helper.call(depth0, "settings.users.user", "session.user.slug", options) : helperMissing.call(depth0, "link-to", "settings.users.user", "session.user.slug", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</li>\n                <li role=\"presentation\"><a class=\"dropdown-item user-menu-support\" role=\"menuitem\" tabindex=\"-1\" href=\"http://support.ghost.org/\"><i class=\"icon-support\"></i> Help / Support</a></li>\n                <li class=\"divider\"></li>\n                <li role=\"presentation\">");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'classNames': ("dropdown-item user-menu-signout"),
-    'role': ("menuitem"),
-    'tabindex': ("-1")
-  },hashTypes:{'classNames': "STRING",'role': "STRING",'tabindex': "STRING"},hashContexts:{'classNames': depth0,'role': depth0,'tabindex': depth0},inverse:self.noop,fn:self.program(16, program16, data),contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "signout", options) : helperMissing.call(depth0, "link-to", "signout", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</li>\n            </ul>\n        ");
-  return buffer;
-  }
-function program14(depth0,data) {
-  
-  
-  data.buffer.push("<i class=\"icon-user\"></i> Your Profile");
-  }
-
-function program16(depth0,data) {
-  
-  
-  data.buffer.push("<i class=\"icon-power\"></i> Sign Out");
-  }
-
-  data.buffer.push("<nav class=\"global-nav\" role=\"navigation\">\n\n    <a class=\"nav-item ghost-logo\" href=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "blog", options) : helperMissing.call(depth0, "gh-path", "blog", options))));
-  data.buffer.push("\" title=\"Visit blog\">\n        <div class=\"nav-label\"><i class=\"icon-ghost\"></i> <span>Visit blog</span> </div>\n    </a>\n\n    ");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'classNames': ("nav-item nav-content js-nav-item")
-  },hashTypes:{'classNames': "STRING"},hashContexts:{'classNames': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "posts", options) : helperMissing.call(depth0, "link-to", "posts", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n\n    ");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'classNames': ("nav-item nav-new js-nav-item")
-  },hashTypes:{'classNames': "STRING"},hashContexts:{'classNames': depth0},inverse:self.noop,fn:self.program(3, program3, data),contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "editor.new", options) : helperMissing.call(depth0, "link-to", "editor.new", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n\n    ");
-  stack1 = helpers.unless.call(depth0, "session.user.isAuthor", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(5, program5, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n\n    \n\n    <div class=\"nav-item user-menu\">\n        ");
-  stack1 = (helper = helpers['gh-dropdown-button'] || (depth0 && depth0['gh-dropdown-button']),options={hash:{
-    'dropdownName': ("user-menu"),
-    'tagName': ("div"),
-    'classNames': ("nav-label clearfix")
-  },hashTypes:{'dropdownName': "STRING",'tagName': "STRING",'classNames': "STRING"},hashContexts:{'dropdownName': depth0,'tagName': depth0,'classNames': depth0},inverse:self.noop,fn:self.program(8, program8, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-dropdown-button", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n        ");
-  stack1 = (helper = helpers['gh-dropdown'] || (depth0 && depth0['gh-dropdown']),options={hash:{
-    'tagName': ("div"),
-    'classNames': ("dropdown"),
-    'name': ("user-menu"),
-    'closeOnClick': ("true")
-  },hashTypes:{'tagName': "STRING",'classNames': "STRING",'name': "STRING",'closeOnClick': "STRING"},hashContexts:{'tagName': depth0,'classNames': depth0,'name': depth0,'closeOnClick': depth0},inverse:self.noop,fn:self.program(13, program13, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-dropdown", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    </div>\n\n</nav>\n\n<div class=\"nav-cover js-nav-cover\"></div>\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/-publish-bar', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', helper, options, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression;
-
-
-  data.buffer.push("<footer id=\"publish-bar\">\n    <div class=\"publish-bar-inner\">\n        ");
-  data.buffer.push(escapeExpression((helper = helpers.render || (depth0 && depth0.render),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "post-tags-input", options) : helperMissing.call(depth0, "render", "post-tags-input", options))));
-  data.buffer.push("\n\n        <div class=\"publish-bar-actions\">\n            <button type=\"button\" class=\"post-settings\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "toggleSettingsMenu", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push("></button>\n            ");
-  data.buffer.push(escapeExpression(helpers.view.call(depth0, "editor-save-button", {hash:{
-    'id': ("entry-actions"),
-    'classNameBindings': ("isNew:unsaved")
-  },hashTypes:{'id': "STRING",'classNameBindings': "STRING"},hashContexts:{'id': depth0,'classNameBindings': depth0},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push("\n        </div>\n    </div>\n</footer>\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/-user-actions-menu', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, escapeExpression=this.escapeExpression, self=this;
-
-function program1(depth0,data) {
-  
-  var buffer = '';
-  data.buffer.push("\n<li><button ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "openModal", "transfer-owner", "", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0,depth0],types:["STRING","STRING","ID"],data:data})));
-  data.buffer.push(">Make Owner</button></li>\n");
-  return buffer;
-  }
-
-function program3(depth0,data) {
-  
-  var buffer = '';
-  data.buffer.push("\n<li><button ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "openModal", "delete-user", "", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0,depth0],types:["STRING","STRING","ID"],data:data})));
-  data.buffer.push(" class=\"delete\">Delete User</button></li>\n");
-  return buffer;
-  }
-
-  stack1 = helpers['if'].call(depth0, "view.canMakeOwner", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  stack1 = helpers['if'].call(depth0, "view.deleteUserActionIsVisible", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(3, program3, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  return buffer;
-  
-}); });
-
-define('ghost/templates/application', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression, self=this;
-
-function program1(depth0,data) {
-  
-  var buffer = '', helper, options;
-  data.buffer.push("\n    ");
-  data.buffer.push(escapeExpression((helper = helpers.partial || (depth0 && depth0.partial),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "navbar", options) : helperMissing.call(depth0, "partial", "navbar", options))));
-  data.buffer.push("\n");
-  return buffer;
-  }
-
-  data.buffer.push("<a class=\"sr-only sr-only-focusable\" href=\"#gh-main\">Skip to main content</a>\n\n");
-  stack1 = helpers.unless.call(depth0, "hideNav", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n\n<main id=\"gh-main\" class=\"viewport\" role=\"main\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'data-notification-count': ("topNotificationCount")
-  },hashTypes:{'data-notification-count': "ID"},hashContexts:{'data-notification-count': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n    ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-notifications'] || (depth0 && depth0['gh-notifications']),options={hash:{
-    'location': ("top"),
-    'notify': ("topNotificationChange")
-  },hashTypes:{'location': "STRING",'notify': "STRING"},hashContexts:{'location': depth0,'notify': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-notifications", options))));
-  data.buffer.push("\n    ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-notifications'] || (depth0 && depth0['gh-notifications']),options={hash:{
-    'location': ("bottom")
-  },hashTypes:{'location': "STRING"},hashContexts:{'location': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-notifications", options))));
-  data.buffer.push("\n    ");
-  stack1 = helpers._triageMustache.call(depth0, "outlet", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n</main>\n\n");
-  data.buffer.push(escapeExpression((helper = helpers.outlet || (depth0 && depth0.outlet),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "modal", options) : helperMissing.call(depth0, "outlet", "modal", options))));
-  data.buffer.push("\n\n");
-  data.buffer.push(escapeExpression((helper = helpers.outlet || (depth0 && depth0.outlet),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "settings-menu", options) : helperMissing.call(depth0, "outlet", "settings-menu", options))));
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/components/gh-activating-list-item', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, self=this, helperMissing=helpers.helperMissing;
-
-function program1(depth0,data) {
-  
-  var buffer = '', stack1;
-  stack1 = helpers._triageMustache.call(depth0, "title", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  stack1 = helpers._triageMustache.call(depth0, "yield", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  return buffer;
-  }
-
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'alternateActive': ("active")
-  },hashTypes:{'alternateActive': "ID"},hashContexts:{'alternateActive': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["ID"],data:data},helper ? helper.call(depth0, "route", options) : helperMissing.call(depth0, "link-to", "route", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/components/gh-file-upload', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, escapeExpression=this.escapeExpression;
-
-
-  data.buffer.push("    <input data-url=\"upload\" class=\"btn btn-green\" type=\"file\" name=\"importfile\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'accept': ("options.acceptEncoding")
-  },hashTypes:{'accept': "ID"},hashContexts:{'accept': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n    <button type=\"submit\" class=\"btn btn-blue\" id=\"startupload\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'disabled': ("uploadButtonDisabled")
-  },hashTypes:{'disabled': "ID"},hashContexts:{'disabled': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "upload", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">\n        ");
-  stack1 = helpers._triageMustache.call(depth0, "uploadButtonText", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    </button>\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/components/gh-markdown', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', helper, options, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression;
-
-
-  data.buffer.push(escapeExpression((helper = helpers['gh-format-markdown'] || (depth0 && depth0['gh-format-markdown']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data},helper ? helper.call(depth0, "markdown", options) : helperMissing.call(depth0, "gh-format-markdown", "markdown", options))));
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/components/gh-modal-dialog', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, escapeExpression=this.escapeExpression, self=this;
-
-function program1(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("<header class=\"modal-header\"><h1>");
-  stack1 = helpers._triageMustache.call(depth0, "title", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</h1></header>");
-  return buffer;
-  }
-
-function program3(depth0,data) {
-  
-  var buffer = '';
-  data.buffer.push("<a class=\"close\" href=\"\" title=\"Close\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "closeModal", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push("><span class=\"hidden\">Close</span></a>");
-  return buffer;
-  }
-
-function program5(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n            <footer class=\"modal-footer\">\n                <button type=\"button\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'class': ("rejectButtonClass :js-button-reject")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "confirm", "reject", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data})));
-  data.buffer.push(">\n                    ");
-  stack1 = helpers._triageMustache.call(depth0, "confirm.reject.text", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n                </button>\n                <button type=\"button\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'class': ("acceptButtonClass :js-button-accept")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "confirm", "accept", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data})));
-  data.buffer.push(">\n                    ");
-  stack1 = helpers._triageMustache.call(depth0, "confirm.accept.text", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n                </button>\n            </footer>\n            ");
-  return buffer;
-  }
-
-  data.buffer.push("<div class=\"modal-container js-modal-container\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "closeModal", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">\n    <article ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'class': ("klass :js-modal")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n        <section class=\"modal-content\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, {hash:{
-    'bubbles': (false),
-    'preventDefault': (false)
-  },hashTypes:{'bubbles': "BOOLEAN",'preventDefault': "BOOLEAN"},hashContexts:{'bubbles': depth0,'preventDefault': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n            ");
-  stack1 = helpers['if'].call(depth0, "title", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n            ");
-  stack1 = helpers['if'].call(depth0, "showClose", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(3, program3, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n            <section class=\"modal-body\">\n                ");
-  stack1 = helpers._triageMustache.call(depth0, "yield", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n            </section>\n            ");
-  stack1 = helpers['if'].call(depth0, "confirm", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(5, program5, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n        </section>\n    </article>\n</div>\n<div class=\"modal-background fade js-modal-background\"></div>\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/components/gh-notification', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', escapeExpression=this.escapeExpression;
-
-
-  data.buffer.push("<section ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'class': (":js-notification typeClass")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n    <span class=\"notification-message\">\n        ");
-  data.buffer.push(escapeExpression(helpers._triageMustache.call(depth0, "message.message", {hash:{
-    'unescaped': ("true")
-  },hashTypes:{'unescaped': "STRING"},hashContexts:{'unescaped': depth0},contexts:[depth0],types:["ID"],data:data})));
-  data.buffer.push("\n    </span>\n    <button class=\"close\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "closeNotification", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push("><span class=\"hidden\">Close</span></button>\n</section>");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/components/gh-notifications', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression, self=this;
-
-function program1(depth0,data) {
-  
-  var buffer = '', helper, options;
-  data.buffer.push("\n    ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-notification'] || (depth0 && depth0['gh-notification']),options={hash:{
-    'message': ("message")
-  },hashTypes:{'message': "ID"},hashContexts:{'message': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-notification", options))));
-  data.buffer.push("\n");
-  return buffer;
-  }
-
-  stack1 = helpers.each.call(depth0, "message", "in", "messages", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0,depth0,depth0],types:["ID","ID","ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/components/gh-role-selector', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, escapeExpression=this.escapeExpression, self=this;
-
-function program1(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n<option ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'value': ("role.id")
-  },hashTypes:{'value': "ID"},hashContexts:{'value': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">");
-  stack1 = helpers._triageMustache.call(depth0, "role.name", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</option>\n");
-  return buffer;
-  }
-
-  data.buffer.push("<select ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'id': ("selectId"),
-    'name': ("selectName")
-  },hashTypes:{'id': "ID",'name': "ID"},hashContexts:{'id': depth0,'name': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n");
-  stack1 = helpers.each.call(depth0, "role", "in", "roles", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0,depth0,depth0],types:["ID","ID","ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n</select>\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/components/gh-uploader', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, escapeExpression=this.escapeExpression;
-
-
-  data.buffer.push("<span class=\"media\">\n    <span class=\"hidden\">Image Upload</span>\n</span>\n<img class=\"js-upload-target\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'src': ("image")
-  },hashTypes:{'src': "ID"},hashContexts:{'src': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n<div class=\"description\">");
-  stack1 = helpers._triageMustache.call(depth0, "description", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("<strong></strong></div>\n<input data-url=\"upload\" class=\"js-fileupload main fileupload\" type=\"file\" name=\"uploadimage\">");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/editor-save-button', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, escapeExpression=this.escapeExpression, self=this, helperMissing=helpers.helperMissing;
-
-function program1(depth0,data) {
-  
-  
-  data.buffer.push("\n    <i class=\"options\"></i>\n    <span class=\"sr-only\">Toggle Settings Menu</span>\n");
-  }
-
-function program3(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n    <ul class=\"dropdown-menu dropdown-triangle-bottom-right\">\n        <li class=\"post-save-publish\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'class': ("willPublish:active")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n            <a ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "setSaveType", "publish", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data})));
-  data.buffer.push(" href=\"#\">");
-  stack1 = helpers._triageMustache.call(depth0, "view.publishText", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</a>\n        </li>\n        <li class=\"post-save-draft\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'class': ("willPublish::active")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n            <a ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "setSaveType", "draft", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data})));
-  data.buffer.push(" href=\"#\">");
-  stack1 = helpers._triageMustache.call(depth0, "view.draftText", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</a>\n        </li>\n        <li class=\"divider delete\"></li>\n        <li class=\"delete\">\n            <a ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "openModal", "delete-post", "", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0,depth0],types:["STRING","STRING","ID"],data:data})));
-  data.buffer.push(" href=\"#\">Delete Post</a>\n        </li>\n    </ul>\n");
-  return buffer;
-  }
-
-  data.buffer.push("<button type=\"button\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "save", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'class': (":btn :btn-sm view.isDangerous:btn-red:btn-blue :js-publish-button")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">");
-  stack1 = helpers._triageMustache.call(depth0, "view.saveText", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</button>\n");
-  stack1 = (helper = helpers['gh-dropdown-button'] || (depth0 && depth0['gh-dropdown-button']),options={hash:{
-    'dropdownName': ("post-save-menu"),
-    'classNameBindings': (":btn :btn-sm view.isDangerous:btn-red:btn-blue btnopen:active :dropdown-toggle :up")
-  },hashTypes:{'dropdownName': "STRING",'classNameBindings': "STRING"},hashContexts:{'dropdownName': depth0,'classNameBindings': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-dropdown-button", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  stack1 = (helper = helpers['gh-dropdown'] || (depth0 && depth0['gh-dropdown']),options={hash:{
-    'name': ("post-save-menu"),
-    'closeOnClick': ("true"),
-    'tagName': ("div"),
-    'classNames': ("dropdown editor-options")
-  },hashTypes:{'name': "STRING",'closeOnClick': "STRING",'tagName': "STRING",'classNames': "STRING"},hashContexts:{'name': depth0,'closeOnClick': depth0,'tagName': depth0,'classNames': depth0},inverse:self.noop,fn:self.program(3, program3, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-dropdown", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  return buffer;
-  
-}); });
-
-define('ghost/templates/editor/edit', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', helper, options, escapeExpression=this.escapeExpression, helperMissing=helpers.helperMissing;
-
-
-  data.buffer.push("<header class=\"page-header\">\n    <button class=\"menu-button js-menu-button\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "toggleGlobalMobileNav", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push("><span class=\"sr-only\">Menu</span></button>\n    <h2 class=\"page-title\">Editor</h2>\n</header>\n\n<div class=\"page-content\">\n    <header>\n        <section class=\"box entry-title\">\n            ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-trim-focus-input'] || (depth0 && depth0['gh-trim-focus-input']),options={hash:{
-    'type': ("text"),
-    'id': ("entry-title"),
-    'placeholder': ("Your Post Title"),
-    'value': ("titleScratch"),
-    'tabindex': ("1"),
-    'focus': ("shouldFocusTitle")
-  },hashTypes:{'type': "STRING",'id': "STRING",'placeholder': "STRING",'value': "ID",'tabindex': "STRING",'focus': "ID"},hashContexts:{'type': depth0,'id': depth0,'placeholder': depth0,'value': depth0,'tabindex': depth0,'focus': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-trim-focus-input", options))));
-  data.buffer.push("\n        </section>\n    </header>\n\n    <section ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'class': (":entry-markdown :js-entry-markdown isPreview::active")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n        <header ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "togglePreview", false, {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","BOOLEAN"],data:data})));
-  data.buffer.push(" class=\"floatingheader\">\n            <small>Markdown</small>\n            <a class=\"markdown-help\" href=\"\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "openModal", "markdown", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data})));
-  data.buffer.push("><span class=\"hidden\">What is Markdown?</span></a>\n        </header>\n        <section id=\"entry-markdown-content\" class=\"entry-markdown-content\">\n            ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-codemirror'] || (depth0 && depth0['gh-codemirror']),options={hash:{
-    'value': ("scratch"),
-    'scrollInfo': ("view.markdownScrollInfo"),
-    'setCodeMirror': ("setCodeMirror"),
-    'openModal': ("openModal"),
-    'typingPause': ("autoSave"),
-    'focus': ("shouldFocusEditor"),
-    'focusCursorAtEnd': ("model.isDirty"),
-    'onFocusIn': ("autoSaveNew")
-  },hashTypes:{'value': "ID",'scrollInfo': "ID",'setCodeMirror': "STRING",'openModal': "STRING",'typingPause': "STRING",'focus': "ID",'focusCursorAtEnd': "ID",'onFocusIn': "STRING"},hashContexts:{'value': depth0,'scrollInfo': depth0,'setCodeMirror': depth0,'openModal': depth0,'typingPause': depth0,'focus': depth0,'focusCursorAtEnd': depth0,'onFocusIn': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-codemirror", options))));
-  data.buffer.push("\n        </section>\n    </section>\n\n    <section ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'class': (":entry-preview :js-entry-preview isPreview:active")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n        <header ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "togglePreview", true, {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","BOOLEAN"],data:data})));
-  data.buffer.push(" class=\"floatingheader\">\n            <small>Preview <span class=\"entry-word-count js-entry-word-count\">");
-  data.buffer.push(escapeExpression((helper = helpers['gh-count-words'] || (depth0 && depth0['gh-count-words']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data},helper ? helper.call(depth0, "scratch", options) : helperMissing.call(depth0, "gh-count-words", "scratch", options))));
-  data.buffer.push("</span></small>\n        </header>\n        <section class=\"entry-preview-content js-entry-preview-content\">\n            ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-markdown'] || (depth0 && depth0['gh-markdown']),options={hash:{
-    'classNames': ("rendered-markdown js-rendered-markdown"),
-    'markdown': ("scratch"),
-    'scrollPosition': ("view.scrollPosition"),
-    'uploadStarted': ("disableCodeMirror"),
-    'uploadFinished': ("enableCodeMirror"),
-    'uploadSuccess': ("handleImgUpload")
-  },hashTypes:{'classNames': "STRING",'markdown': "ID",'scrollPosition': "ID",'uploadStarted': "STRING",'uploadFinished': "STRING",'uploadSuccess': "STRING"},hashContexts:{'classNames': depth0,'markdown': depth0,'scrollPosition': depth0,'uploadStarted': depth0,'uploadFinished': depth0,'uploadSuccess': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-markdown", options))));
-  data.buffer.push("\n        </section>\n    </section>\n\n    ");
-  data.buffer.push(escapeExpression((helper = helpers.partial || (depth0 && depth0.partial),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "publish-bar", options) : helperMissing.call(depth0, "partial", "publish-bar", options))));
-  data.buffer.push("\n\n</div>\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/error', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, self=this, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression;
-
-function program1(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n    <section class=\"error-stack\">\n        <h3>Stack Trace</h3>\n        <p><strong>");
-  stack1 = helpers._triageMustache.call(depth0, "message", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</strong></p>\n        <ul class=\"error-stack-list\">\n            ");
-  stack1 = helpers.each.call(depth0, "item", "in", "stack", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(2, program2, data),contexts:[depth0,depth0,depth0],types:["ID","ID","ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n        </ul>\n    </section>\n");
-  return buffer;
-  }
-function program2(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n                <li>\n                    at\n                    ");
-  stack1 = helpers['if'].call(depth0, "item.function", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(3, program3, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n                    <span class=\"error-stack-file\">(");
-  stack1 = helpers._triageMustache.call(depth0, "item.at", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push(")</span>\n                </li>\n            ");
-  return buffer;
-  }
-function program3(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("<em class=\"error-stack-function\">");
-  stack1 = helpers._triageMustache.call(depth0, "item.function", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</em>");
-  return buffer;
-  }
-
-  data.buffer.push("<section class=\"error-content error-404 js-error-container\">\n    <section class=\"error-details\">\n         <figure class=\"error-image\">\n             <img class=\"error-ghost\" src=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/404-ghost@2x.png", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/404-ghost@2x.png", options))));
-  data.buffer.push("\" srcset=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/404-ghost.png", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/404-ghost.png", options))));
-  data.buffer.push(" 1x, ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data},helper ? helper.call(depth0, "admin", "/img/404-ghost@2x.png", options) : helperMissing.call(depth0, "gh-path", "admin", "/img/404-ghost@2x.png", options))));
-  data.buffer.push(" 2x\" />\n         </figure>\n         <section class=\"error-message\">\n             <h1 class=\"error-code\">");
-  stack1 = helpers._triageMustache.call(depth0, "code", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</h1>\n             <h2 class=\"error-description\">");
-  stack1 = helpers._triageMustache.call(depth0, "message", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</h2>\n             <a class=\"error-link\" href=\"");
-  data.buffer.push(escapeExpression((helper = helpers['gh-path'] || (depth0 && depth0['gh-path']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "blog", options) : helperMissing.call(depth0, "gh-path", "blog", options))));
-  data.buffer.push("\">Go to the front page →</a>\n         </section>\n    </section>\n</section>\n\n");
-  stack1 = helpers['if'].call(depth0, "stack", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/forgotten', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', helper, options, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression;
-
-
-  data.buffer.push("<section class=\"forgotten-box js-forgotten-box fade-in\">\n    <form id=\"forgotten\" class=\"forgotten-form\" method=\"post\" novalidate=\"novalidate\">\n        <div class=\"email-wrap\">\n            ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-trim-focus-input'] || (depth0 && depth0['gh-trim-focus-input']),options={hash:{
-    'value': ("email"),
-    'class': ("email"),
-    'type': ("email"),
-    'placeholder': ("Email Address"),
-    'name': ("email"),
-    'autofocus': ("autofocus"),
-    'autocapitalize': ("off"),
-    'autocorrect': ("off")
-  },hashTypes:{'value': "ID",'class': "STRING",'type': "STRING",'placeholder': "STRING",'name': "STRING",'autofocus': "STRING",'autocapitalize': "STRING",'autocorrect': "STRING"},hashContexts:{'value': depth0,'class': depth0,'type': depth0,'placeholder': depth0,'name': depth0,'autofocus': depth0,'autocapitalize': depth0,'autocorrect': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-trim-focus-input", options))));
-  data.buffer.push("\n        </div>\n        <button class=\"btn btn-blue\" type=\"submit\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "submit", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'disabled': ("submitting")
-  },hashTypes:{'disabled': "ID"},hashContexts:{'disabled': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">Send new password</button>\n    </form>\n</section>\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/modals/copy-html', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression, self=this;
-
-function program1(depth0,data) {
-  
-  var buffer = '', helper, options;
-  data.buffer.push("\n\n    ");
-  data.buffer.push(escapeExpression((helper = helpers.textarea || (depth0 && depth0.textarea),options={hash:{
-    'value': ("generatedHTML"),
-    'rows': ("6")
-  },hashTypes:{'value': "ID",'rows': "STRING"},hashContexts:{'value': depth0,'rows': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "textarea", options))));
-  data.buffer.push("\n\n");
-  return buffer;
-  }
-
-  stack1 = (helper = helpers['gh-modal-dialog'] || (depth0 && depth0['gh-modal-dialog']),options={hash:{
-    'action': ("closeModal"),
-    'showClose': (true),
-    'type': ("action"),
-    'animation': ("fade"),
-    'title': ("Generated HTML"),
-    'confirm': ("confirm"),
-    'class': ("copy-html")
-  },hashTypes:{'action': "STRING",'showClose': "BOOLEAN",'type': "STRING",'animation': "STRING",'title': "STRING",'confirm': "ID",'class': "STRING"},hashContexts:{'action': depth0,'showClose': depth0,'type': depth0,'animation': depth0,'title': depth0,'confirm': depth0,'class': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-modal-dialog", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/modals/delete-all', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, self=this, helperMissing=helpers.helperMissing;
-
-function program1(depth0,data) {
-  
-  
-  data.buffer.push("\n\n    <p>This is permanent! No backups, no restores, no magic undo button. <br /> We warned you, ok?</p>\n\n");
-  }
-
-  stack1 = (helper = helpers['gh-modal-dialog'] || (depth0 && depth0['gh-modal-dialog']),options={hash:{
-    'action': ("closeModal"),
-    'type': ("action"),
-    'style': ("wide,centered"),
-    'animation': ("fade"),
-    'title': ("Would you really like to delete all content from your blog?"),
-    'confirm': ("confirm")
-  },hashTypes:{'action': "STRING",'type': "STRING",'style': "STRING",'animation': "STRING",'title': "STRING",'confirm': "ID"},hashContexts:{'action': depth0,'type': depth0,'style': depth0,'animation': depth0,'title': depth0,'confirm': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-modal-dialog", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/modals/delete-post', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, self=this, helperMissing=helpers.helperMissing;
-
-function program1(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n\n    <p>You're about to delete \"<strong>");
-  stack1 = helpers._triageMustache.call(depth0, "model.title", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</strong>\".<br />This is permanent! No backups, no restores, no magic undo button. <br /> We warned you, ok?</p>\n\n");
-  return buffer;
-  }
-
-  stack1 = (helper = helpers['gh-modal-dialog'] || (depth0 && depth0['gh-modal-dialog']),options={hash:{
-    'action': ("closeModal"),
-    'showClose': (true),
-    'type': ("action"),
-    'style': ("wide,centered"),
-    'animation': ("fade"),
-    'title': ("Are you sure you want to delete this post?"),
-    'confirm': ("confirm")
-  },hashTypes:{'action': "STRING",'showClose': "BOOLEAN",'type': "STRING",'style': "STRING",'animation': "STRING",'title': "STRING",'confirm': "ID"},hashContexts:{'action': depth0,'showClose': depth0,'type': depth0,'style': depth0,'animation': depth0,'title': depth0,'confirm': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-modal-dialog", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/modals/delete-user', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, self=this, helperMissing=helpers.helperMissing;
-
-function program1(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n\n    ");
-  stack1 = helpers.unless.call(depth0, "userPostCount.isPending", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(2, program2, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n\n");
-  return buffer;
-  }
-function program2(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n        ");
-  stack1 = helpers['if'].call(depth0, "userPostCount.count", {hash:{},hashTypes:{},hashContexts:{},inverse:self.program(5, program5, data),fn:self.program(3, program3, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    ");
-  return buffer;
-  }
-function program3(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n            <strong>WARNING:</strong> <span class=\"red\">This user is the author of ");
-  stack1 = helpers._triageMustache.call(depth0, "userPostCount.count", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push(" ");
-  stack1 = helpers._triageMustache.call(depth0, "userPostCount.inflection", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push(".</span> All posts and user data will be deleted. There is no way to recover this.\n        ");
-  return buffer;
-  }
-
-function program5(depth0,data) {
-  
-  
-  data.buffer.push("\n            <strong>WARNING:</strong> All user data will be deleted. There is no way to recover this.\n        ");
-  }
-
-  stack1 = (helper = helpers['gh-modal-dialog'] || (depth0 && depth0['gh-modal-dialog']),options={hash:{
-    'action': ("closeModal"),
-    'showClose': (true),
-    'type': ("action"),
-    'style': ("wide,centered"),
-    'animation': ("fade"),
-    'title': ("Are you sure you want to delete this user?"),
-    'confirm': ("confirm")
-  },hashTypes:{'action': "STRING",'showClose': "BOOLEAN",'type': "STRING",'style': "STRING",'animation': "STRING",'title': "STRING",'confirm': "ID"},hashContexts:{'action': depth0,'showClose': depth0,'type': depth0,'style': depth0,'animation': depth0,'title': depth0,'confirm': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-modal-dialog", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/modals/invite-new-user', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression, self=this;
-
-function program1(depth0,data) {
-  
-  var buffer = '', helper, options;
-  data.buffer.push("\n\n        <fieldset>\n            <div class=\"form-group\">\n                <label for=\"new-user-email\">Email Address</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'action': ("confirmAccept"),
-    'class': ("email"),
-    'id': ("new-user-email"),
-    'type': ("email"),
-    'placeholder': ("Email Address"),
-    'name': ("email"),
-    'autofocus': ("autofocus"),
-    'autocapitalize': ("off"),
-    'autocorrect': ("off"),
-    'value': ("email")
-  },hashTypes:{'action': "STRING",'class': "STRING",'id': "STRING",'type': "STRING",'placeholder': "STRING",'name': "STRING",'autofocus': "STRING",'autocapitalize': "STRING",'autocorrect': "STRING",'value': "ID"},hashContexts:{'action': depth0,'class': depth0,'id': depth0,'type': depth0,'placeholder': depth0,'name': depth0,'autofocus': depth0,'autocapitalize': depth0,'autocorrect': depth0,'value': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n            </div>\n\n            <div class=\"form-group for-select\">\n                <label for=\"new-user-role\">Role</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-role-selector'] || (depth0 && depth0['gh-role-selector']),options={hash:{
-    'initialValue': ("authorRole"),
-    'onChange': ("setRole"),
-    'selectId': ("new-user-role")
-  },hashTypes:{'initialValue': "ID",'onChange': "STRING",'selectId': "STRING"},hashContexts:{'initialValue': depth0,'onChange': depth0,'selectId': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-role-selector", options))));
-  data.buffer.push("\n            </div>\n\n        </fieldset>\n\n");
-  return buffer;
-  }
-
-  stack1 = (helper = helpers['gh-modal-dialog'] || (depth0 && depth0['gh-modal-dialog']),options={hash:{
-    'action': ("closeModal"),
-    'showClose': (true),
-    'type': ("action"),
-    'animation': ("fade"),
-    'title': ("Invite a New User"),
-    'confirm': ("confirm"),
-    'class': ("invite-new-user")
-  },hashTypes:{'action': "STRING",'showClose': "BOOLEAN",'type': "STRING",'animation': "STRING",'title': "STRING",'confirm': "ID",'class': "STRING"},hashContexts:{'action': depth0,'showClose': depth0,'type': depth0,'animation': depth0,'title': depth0,'confirm': depth0,'class': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-modal-dialog", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/modals/leave-editor', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, self=this, helperMissing=helpers.helperMissing;
-
-function program1(depth0,data) {
-  
-  
-  data.buffer.push("\n\n    <p>Hey there! It looks like you're in the middle of writing something and you haven't saved all of your\n    content.</p>\n    \n    <p>Save before you go!</p>\n\n");
-  }
-
-  stack1 = (helper = helpers['gh-modal-dialog'] || (depth0 && depth0['gh-modal-dialog']),options={hash:{
-    'action': ("closeModal"),
-    'showClose': (true),
-    'type': ("action"),
-    'style': ("wide,centered"),
-    'animation': ("fade"),
-    'title': ("Are you sure you want to leave this page?"),
-    'confirm': ("confirm")
-  },hashTypes:{'action': "STRING",'showClose': "BOOLEAN",'type': "STRING",'style': "STRING",'animation': "STRING",'title': "STRING",'confirm': "ID"},hashContexts:{'action': depth0,'showClose': depth0,'type': depth0,'style': depth0,'animation': depth0,'title': depth0,'confirm': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-modal-dialog", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/modals/markdown', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, self=this, helperMissing=helpers.helperMissing;
-
-function program1(depth0,data) {
-  
-  
-  data.buffer.push("\n    <section class=\"markdown-help-container\">\n        <table class=\"modal-markdown-help-table\">\n            <thead>\n            <tr>\n                <th>Result</th>\n                <th>Markdown</th>\n                <th>Shortcut</th>\n            </tr>\n            </thead>\n            <tbody>\n            <tr>\n                <td><strong>Bold</strong></td>\n                <td>**text**</td>\n                <td>Ctrl/⌘ + B </td>\n            </tr>\n            <tr>\n                <td><em>Emphasize</em></td>\n                <td>*text*</td>\n                <td>Ctrl/⌘ + I</td>\n            </tr>\n            <tr>\n                <td><del>Strike-through</del></td>\n                <td>~~text~~</td>\n                <td>Ctrl + Alt + U</td>\n            </tr>\n            <tr>\n                <td><a href=\"#\">Link</a></td>\n                <td>[title](http://)</td>\n                <td>Ctrl/⌘ + K</td>\n            </tr>\n            <tr>\n                <td><code>Inline Code</code></td>\n                <td>`code`</td>\n                <td>Ctrl/⌘ + Shift + K</td>\n            </tr>\n            <tr>\n                <td>Image</td>\n                <td>![alt](http://)</td>\n                <td>Ctrl/⌘ + Shift + I</td>\n            </tr>\n            <tr>\n                <td>List</td>\n                <td>* item</td>\n                <td>Ctrl + L</td>\n            </tr>\n            <tr>\n                <td>Blockquote</td>\n                <td>> quote</td>\n                <td>Ctrl + Q</td>\n            </tr>\n            <tr>\n                <td><mark>Highlight</mark></td>\n                <td>==Highlight==</td>\n                <td></td>\n            </tr>\n            <tr>\n                <td>H1</td>\n                <td># Heading</td>\n                <td></td>\n            </tr>\n            <tr>\n                <td>H2</td>\n                <td>## Heading</td>\n                <td>Ctrl/⌘ + H</td>\n            </tr>\n            <tr>\n                <td>H3</td>\n                <td>### Heading</td>\n                <td>Ctrl/⌘ + H (x2)</td>\n            </tr>\n            </tbody>\n        </table>\n        For further Markdown syntax reference: <a href=\"http://daringfireball.net/projects/markdown/syntax\" target=\"_blank\">Markdown Documentation</a>\n    </section>\n");
-  }
-
-  stack1 = (helper = helpers['gh-modal-dialog'] || (depth0 && depth0['gh-modal-dialog']),options={hash:{
-    'action': ("closeModal"),
-    'showClose': (true),
-    'style': ("wide"),
-    'animation': ("fade"),
-    'title': ("Markdown Help")
-  },hashTypes:{'action': "STRING",'showClose': "BOOLEAN",'style': "STRING",'animation': "STRING",'title': "STRING"},hashContexts:{'action': depth0,'showClose': depth0,'style': depth0,'animation': depth0,'title': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-modal-dialog", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/modals/signin', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, escapeExpression=this.escapeExpression, helperMissing=helpers.helperMissing, self=this;
-
-function program1(depth0,data) {
-  
-  var buffer = '', helper, options;
-  data.buffer.push("\n\n        <form id=\"login\" class=\"login-form\" method=\"post\" novalidate=\"novalidate\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "validateAndAuthenticate", {hash:{
-    'on': ("submit")
-  },hashTypes:{'on': "STRING"},hashContexts:{'on': depth0},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">\n            <div class=\"password-wrap\">\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'class': ("password"),
-    'type': ("password"),
-    'placeholder': ("Password"),
-    'name': ("password"),
-    'value': ("password")
-  },hashTypes:{'class': "STRING",'type': "STRING",'placeholder': "STRING",'name': "STRING",'value': "ID"},hashContexts:{'class': depth0,'type': depth0,'placeholder': depth0,'name': depth0,'value': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n            </div>\n            <button class=\"btn btn-blue\" type=\"submit\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "validateAndAuthenticate", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'disabled': ("submitting")
-  },hashTypes:{'disabled': "ID"},hashContexts:{'disabled': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">Log in</button>\n       </form>\n\n");
-  return buffer;
-  }
-
-  stack1 = (helper = helpers['gh-modal-dialog'] || (depth0 && depth0['gh-modal-dialog']),options={hash:{
-    'action': ("closeModal"),
-    'showClose': (true),
-    'type': ("action"),
-    'style': ("wide"),
-    'animation': ("fade"),
-    'title': ("Please re-authenticate"),
-    'confirm': ("confirm")
-  },hashTypes:{'action': "STRING",'showClose': "BOOLEAN",'type': "STRING",'style': "STRING",'animation': "STRING",'title': "STRING",'confirm': "ID"},hashContexts:{'action': depth0,'showClose': depth0,'type': depth0,'style': depth0,'animation': depth0,'title': depth0,'confirm': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-modal-dialog", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/modals/transfer-owner', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, self=this, helperMissing=helpers.helperMissing;
-
-function program1(depth0,data) {
-  
-  
-  data.buffer.push("\n\n    <p>Are you sure you want to transfer the ownership of this blog? You will not be able to undo this action.</p>\n\n");
-  }
-
-  stack1 = (helper = helpers['gh-modal-dialog'] || (depth0 && depth0['gh-modal-dialog']),options={hash:{
-    'action': ("closeModal"),
-    'showClose': (true),
-    'type': ("action"),
-    'style': ("wide,centered"),
-    'animation': ("fade"),
-    'title': ("Transfer Ownership"),
-    'confirm': ("confirm")
-  },hashTypes:{'action': "STRING",'showClose': "BOOLEAN",'type': "STRING",'style': "STRING",'animation': "STRING",'title': "STRING",'confirm': "ID"},hashContexts:{'action': depth0,'showClose': depth0,'type': depth0,'style': depth0,'animation': depth0,'title': depth0,'confirm': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-modal-dialog", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/modals/upload', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, escapeExpression=this.escapeExpression, self=this, helperMissing=helpers.helperMissing;
-
-function program1(depth0,data) {
-  
-  var buffer = '';
-  data.buffer.push("\n  <section class=\"js-drop-zone\">\n      <img class=\"js-upload-target\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'src': ("src")
-  },hashTypes:{'src': "ID"},hashContexts:{'src': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(" alt=\"logo\">\n      <input data-url=\"upload\" class=\"js-fileupload main\" type=\"file\" name=\"uploadimage\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'accept': ("acceptEncoding")
-  },hashTypes:{'accept': "ID"},hashContexts:{'accept': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(" >\n  </section>\n\n");
-  return buffer;
-  }
-
-  stack1 = (helper = helpers['gh-upload-modal'] || (depth0 && depth0['gh-upload-modal']),options={hash:{
-    'action': ("closeModal"),
-    'close': (true),
-    'type': ("action"),
-    'style': ("wide"),
-    'model': ("model"),
-    'imageType': ("imageType"),
-    'animation': ("fade")
-  },hashTypes:{'action': "STRING",'close': "BOOLEAN",'type': "STRING",'style': "STRING",'model': "ID",'imageType': "ID",'animation': "STRING"},hashContexts:{'action': depth0,'close': depth0,'type': depth0,'style': depth0,'model': depth0,'imageType': depth0,'animation': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-upload-modal", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/post-settings-menu', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, escapeExpression=this.escapeExpression, helperMissing=helpers.helperMissing, self=this, functionType="function", blockHelperMissing=helpers.blockHelperMissing;
-
-function program1(depth0,data) {
-  
-  var buffer = '', stack1, helper, options;
-  data.buffer.push("\n<div id=\"entry-controls\">\n    <div ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'class': ("isViewingSubview:settings-menu-pane-out-left:settings-menu-pane-in :settings-menu :settings-menu-pane")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n        <div class=\"settings-menu-header\">\n            <h4>Post Settings</h4>\n            <button class=\"close icon-x settings-menu-header-action\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "closeSettingsMenu", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push("><span class=\"hidden\">Close</span></button>\n        </div>\n        <div class=\"settings-menu-content\">\n            ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-uploader'] || (depth0 && depth0['gh-uploader']),options={hash:{
-    'uploaded': ("setCoverImage"),
-    'canceled': ("clearCoverImage"),
-    'description': ("Add post image"),
-    'image': ("image"),
-    'uploaderReference': ("uploaderReference"),
-    'tagName': ("section")
-  },hashTypes:{'uploaded': "STRING",'canceled': "STRING",'description': "STRING",'image': "ID",'uploaderReference': "ID",'tagName': "STRING"},hashContexts:{'uploaded': depth0,'canceled': depth0,'description': depth0,'image': depth0,'uploaderReference': depth0,'tagName': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-uploader", options))));
-  data.buffer.push("\n            <form>\n            <div class=\"form-group\">\n                <label for=\"url\">Post URL</label>\n                <span class=\"input-icon icon-link\">\n                    ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-input'] || (depth0 && depth0['gh-input']),options={hash:{
-    'class': ("post-setting-slug"),
-    'id': ("url"),
-    'value': ("slugValue"),
-    'name': ("post-setting-slug"),
-    'focus-out': ("updateSlug"),
-    'selectOnClick': ("true"),
-    'stopEnterKeyDownPropagation': ("true")
-  },hashTypes:{'class': "STRING",'id': "STRING",'value': "ID",'name': "STRING",'focus-out': "STRING",'selectOnClick': "STRING",'stopEnterKeyDownPropagation': "STRING"},hashContexts:{'class': depth0,'id': depth0,'value': depth0,'name': depth0,'focus-out': depth0,'selectOnClick': depth0,'stopEnterKeyDownPropagation': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-input", options))));
-  data.buffer.push("\n                </span>\n            </div>\n\n            <div class=\"form-group\">\n                <label for=\"post-setting-date\">Publish Date</label>\n                <span class=\"input-icon icon-calendar\">\n                    ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-input'] || (depth0 && depth0['gh-input']),options={hash:{
-    'class': ("post-setting-date"),
-    'id': ("post-setting-date"),
-    'value': ("publishedAtValue"),
-    'name': ("post-setting-date"),
-    'focus-out': ("setPublishedAt"),
-    'stopEnterKeyDownPropagation': ("true")
-  },hashTypes:{'class': "STRING",'id': "STRING",'value': "ID",'name': "STRING",'focus-out': "STRING",'stopEnterKeyDownPropagation': "STRING"},hashContexts:{'class': depth0,'id': depth0,'value': depth0,'name': depth0,'focus-out': depth0,'stopEnterKeyDownPropagation': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-input", options))));
-  data.buffer.push("\n                </span>\n            </div>\n\n            ");
-  stack1 = helpers.unless.call(depth0, "session.user.isAuthor", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(2, program2, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n\n            <ul class=\"nav-list nav-list-block\">\n                ");
-  stack1 = (helper = helpers['gh-tab'] || (depth0 && depth0['gh-tab']),options={hash:{
-    'tagName': ("li"),
-    'classNames': ("nav-list-item")
-  },hashTypes:{'tagName': "STRING",'classNames': "STRING"},hashContexts:{'tagName': depth0,'classNames': depth0},inverse:self.noop,fn:self.program(4, program4, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-tab", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n            </ul>\n\n            <div class=\"form-group for-checkbox\">\n                <label class=\"checkbox\" for=\"static-page\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "togglePage", {hash:{
-    'bubbles': ("false")
-  },hashTypes:{'bubbles': "STRING"},hashContexts:{'bubbles': depth0},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">\n                    ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'type': ("checkbox"),
-    'name': ("static-page"),
-    'id': ("static-page"),
-    'class': ("post-setting-static-page"),
-    'checked': ("page")
-  },hashTypes:{'type': "STRING",'name': "STRING",'id': "STRING",'class': "STRING",'checked': "ID"},hashContexts:{'type': depth0,'name': depth0,'id': depth0,'class': depth0,'checked': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n                    <span class=\"input-toggle-component\"></span>\n                    <p>Turn this post into a static page</p>\n                </label>\n\n                <label class=\"checkbox\" for=\"featured\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "toggleFeatured", {hash:{
-    'bubbles': ("false")
-  },hashTypes:{'bubbles': "STRING"},hashContexts:{'bubbles': depth0},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">\n                    ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'type': ("checkbox"),
-    'name': ("featured"),
-    'id': ("featured"),
-    'class': ("post-setting-featured"),
-    'checked': ("featured")
-  },hashTypes:{'type': "STRING",'name': "STRING",'id': "STRING",'class': "STRING",'checked': "ID"},hashContexts:{'type': depth0,'name': depth0,'id': depth0,'class': depth0,'checked': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n                    <span class=\"input-toggle-component\"></span>\n                    <p>Feature this post</p>\n                </label>\n            </div>\n\n            </form>\n        </div>\n    </div>\n\n    <div ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'class': ("isViewingSubview:settings-menu-pane-in:settings-menu-pane-out-right :settings-menu :settings-menu-pane")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n    ");
-  options={hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(6, program6, data),contexts:[],types:[],data:data}
-  if (helper = helpers['gh-tab-pane']) { stack1 = helper.call(depth0, options); }
-  else { helper = (depth0 && depth0['gh-tab-pane']); stack1 = typeof helper === functionType ? helper.call(depth0, options) : helper; }
-  if (!helpers['gh-tab-pane']) { stack1 = blockHelperMissing.call(depth0, 'gh-tab-pane', {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(6, program6, data),contexts:[],types:[],data:data}); }
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    </div>\n</div>\n");
-  return buffer;
-  }
-function program2(depth0,data) {
-  
-  var buffer = '';
-  data.buffer.push("\n            <div class=\"form-group for-select\">\n                <label for=\"author-list\">Author</label>\n                <span class=\"input-icon icon-user\">\n                    <span class=\"gh-select\" tabindex=\"0\">\n                    ");
-  data.buffer.push(escapeExpression(helpers.view.call(depth0, "select", {hash:{
-    'name': ("post-setting-author"),
-    'id': ("author-list"),
-    'content': ("authors"),
-    'optionValuePath': ("content.id"),
-    'optionLabelPath': ("content.name"),
-    'selection': ("selectedAuthor")
-  },hashTypes:{'name': "STRING",'id': "STRING",'content': "ID",'optionValuePath': "STRING",'optionLabelPath': "STRING",'selection': "ID"},hashContexts:{'name': depth0,'id': depth0,'content': depth0,'optionValuePath': depth0,'optionLabelPath': depth0,'selection': depth0},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push("\n                    </span>\n                </span>\n            </div>\n            ");
-  return buffer;
-  }
-
-function program4(depth0,data) {
-  
-  
-  data.buffer.push("\n                    <button type=\"button\">\n                        <b>Meta Data</b>\n                        <span>Extra content for SEO and social media.</span>\n                    </button>\n                ");
-  }
-
-function program6(depth0,data) {
-  
-  var buffer = '', stack1, helper, options;
-  data.buffer.push("\n        <div class=\"settings-menu-header subview\">\n            <button ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "closeSubview", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(" class=\"back icon-chevron-left settings-menu-header-action\"><span class=\"hidden\">Back</span></button>\n            <h4>Meta Data</h4>\n        </div>\n\n        <div class=\"settings-menu-content\">\n            <form>\n            <div class=\"form-group\">\n                <label for=\"meta-title\">Meta Title</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-input'] || (depth0 && depth0['gh-input']),options={hash:{
-    'class': ("post-setting-meta-title"),
-    'id': ("meta-title"),
-    'value': ("metaTitleScratch"),
-    'name': ("post-setting-meta-title"),
-    'focus-out': ("setMetaTitle"),
-    'stopEnterKeyDownPropagation': ("true")
-  },hashTypes:{'class': "STRING",'id': "STRING",'value': "ID",'name': "STRING",'focus-out': "STRING",'stopEnterKeyDownPropagation': "STRING"},hashContexts:{'class': depth0,'id': depth0,'value': depth0,'name': depth0,'focus-out': depth0,'stopEnterKeyDownPropagation': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-input", options))));
-  data.buffer.push("\n                <p>Recommended: <b>70</b> characters. You’ve used ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-count-down-characters'] || (depth0 && depth0['gh-count-down-characters']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["ID","INTEGER"],data:data},helper ? helper.call(depth0, "metaTitleScratch", 70, options) : helperMissing.call(depth0, "gh-count-down-characters", "metaTitleScratch", 70, options))));
-  data.buffer.push("</p>\n            </div>\n\n            <div class=\"form-group\">\n                <label for=\"meta-description\">Meta Description</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-textarea'] || (depth0 && depth0['gh-textarea']),options={hash:{
-    'class': ("post-setting-meta-description"),
-    'id': ("meta-description"),
-    'value': ("metaDescriptionScratch"),
-    'name': ("post-setting-meta-description"),
-    'focus-out': ("setMetaDescription"),
-    'stopEnterKeyDownPropagation': ("true")
-  },hashTypes:{'class': "STRING",'id': "STRING",'value': "ID",'name': "STRING",'focus-out': "STRING",'stopEnterKeyDownPropagation': "STRING"},hashContexts:{'class': depth0,'id': depth0,'value': depth0,'name': depth0,'focus-out': depth0,'stopEnterKeyDownPropagation': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-textarea", options))));
-  data.buffer.push("\n                <p>Recommended: <b>156</b> characters. You’ve used ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-count-down-characters'] || (depth0 && depth0['gh-count-down-characters']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["ID","INTEGER"],data:data},helper ? helper.call(depth0, "metaDescriptionScratch", 156, options) : helperMissing.call(depth0, "gh-count-down-characters", "metaDescriptionScratch", 156, options))));
-  data.buffer.push("</p>\n            </div>\n\n            <div class=\"form-group\">\n                <label>Search Engine Result Preview</label>\n                <div class=\"seo-preview\">\n                    <div class=\"seo-preview-title\">");
-  stack1 = helpers._triageMustache.call(depth0, "seoTitle", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</div>\n                    <div class=\"seo-preview-link\">");
-  stack1 = helpers._triageMustache.call(depth0, "seoURL", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</div>\n                    <div class=\"seo-preview-description\">");
-  stack1 = helpers._triageMustache.call(depth0, "seoDescription", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</div>\n                </div>\n            </div>\n            </form>\n        </div>\n    ");
-  return buffer;
-  }
-
-  data.buffer.push("<div class=\"content-cover\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "closeSettingsMenu", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push("></div>\n");
-  stack1 = (helper = helpers['gh-tabs-manager'] || (depth0 && depth0['gh-tabs-manager']),options={hash:{
-    'selected': ("showSubview"),
-    'id': ("entry-controls"),
-    'class': ("settings-menu-container")
-  },hashTypes:{'selected': "STRING",'id': "STRING",'class': "STRING"},hashContexts:{'selected': depth0,'id': depth0,'class': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-tabs-manager", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/post-tags-input', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, escapeExpression=this.escapeExpression, self=this;
-
-function program1(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n           <span class=\"tag\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "deleteTag", "tag", {hash:{
-    'target': ("view")
-  },hashTypes:{'target': "ID"},hashContexts:{'target': depth0},contexts:[depth0,depth0],types:["STRING","ID"],data:data})));
-  data.buffer.push(">");
-  stack1 = helpers._triageMustache.call(depth0, "tag.name", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</span>\n        ");
-  return buffer;
-  }
-
-function program3(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n            ");
-  stack1 = helpers.view.call(depth0, "view.suggestionView", {hash:{
-    'suggestion': ("suggestion")
-  },hashTypes:{'suggestion': "ID"},hashContexts:{'suggestion': depth0},inverse:self.noop,fn:self.program(4, program4, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n        ");
-  return buffer;
-  }
-function program4(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n                <a href=\"javascript:void(0);\">");
-  stack1 = helpers._triageMustache.call(depth0, "view.suggestion.highlightedName", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</a>\n            ");
-  return buffer;
-  }
-
-  data.buffer.push("<div class=\"publish-bar-tags-icon\">\n    <label class=\"tag-label icon-tag\" for=\"tags\" title=\"Tags\">\n        <span class=\"hidden\">Tags</span>\n    </label>\n</div>\n<div class=\"publish-bar-tags\">\n    <div class=\"tags-wrapper tags\">\n        ");
-  stack1 = helpers.each.call(depth0, "tag", "in", "controller.tags", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0,depth0,depth0],types:["ID","ID","ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    </div>\n</div>\n<div class=\"publish-bar-tags-input\">\n    <input type=\"hidden\" class=\"tags-holder\" id=\"tags-holder\">\n    ");
-  data.buffer.push(escapeExpression(helpers.view.call(depth0, "view.tagInputView", {hash:{
-    'class': ("tag-input js-tag-input"),
-    'id': ("tags"),
-    'value': ("newTagText")
-  },hashTypes:{'class': "STRING",'id': "STRING",'value': "ID"},hashContexts:{'class': depth0,'id': depth0,'value': depth0},contexts:[depth0],types:["ID"],data:data})));
-  data.buffer.push("\n    <ul class=\"suggestions dropdown-menu dropdown-triangle-bottom\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'style': ("view.overlayStyles")
-  },hashTypes:{'style': "ID"},hashContexts:{'style': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n        ");
-  stack1 = helpers.each.call(depth0, "suggestion", "in", "suggestions", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(3, program3, data),contexts:[depth0,depth0,depth0],types:["ID","ID","ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    </ul>\n</div>\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/posts', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, escapeExpression=this.escapeExpression, helperMissing=helpers.helperMissing, self=this;
-
-function program1(depth0,data) {
-  
-  
-  data.buffer.push("<span class=\"hidden\">New Post</span>");
-  }
-
-function program3(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n        <ol class=\"posts-list\">\n            ");
-  stack1 = helpers.each.call(depth0, "post", "in", "model", {hash:{
-    'itemController': ("posts/post"),
-    'itemView': ("post-item-view"),
-    'itemTagName': ("li")
-  },hashTypes:{'itemController': "STRING",'itemView': "STRING",'itemTagName': "STRING"},hashContexts:{'itemController': depth0,'itemView': depth0,'itemTagName': depth0},inverse:self.noop,fn:self.program(4, program4, data),contexts:[depth0,depth0,depth0],types:["ID","ID","ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n        </ol>\n        ");
-  return buffer;
-  }
-function program4(depth0,data) {
-  
-  var buffer = '', stack1, helper, options;
-  data.buffer.push("\n            ");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'class': ("permalink"),
-    'title': ("Edit this post")
-  },hashTypes:{'class': "STRING",'title': "STRING"},hashContexts:{'class': depth0,'title': depth0},inverse:self.noop,fn:self.program(5, program5, data),contexts:[depth0,depth0],types:["STRING","ID"],data:data},helper ? helper.call(depth0, "posts.post", "post", options) : helperMissing.call(depth0, "link-to", "posts.post", "post", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n            ");
-  return buffer;
-  }
-function program5(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n            <h3 class=\"entry-title\">");
-  stack1 = helpers._triageMustache.call(depth0, "post.title", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</h3>\n            <section class=\"entry-meta\">\n                <span class=\"status\">\n                    ");
-  stack1 = helpers['if'].call(depth0, "post.isPublished", {hash:{},hashTypes:{},hashContexts:{},inverse:self.program(11, program11, data),fn:self.program(6, program6, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n                </span>\n            </section>\n            ");
-  return buffer;
-  }
-function program6(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n                    ");
-  stack1 = helpers['if'].call(depth0, "post.page", {hash:{},hashTypes:{},hashContexts:{},inverse:self.program(9, program9, data),fn:self.program(7, program7, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n                    ");
-  return buffer;
-  }
-function program7(depth0,data) {
-  
-  
-  data.buffer.push("\n                    <span class=\"page\">Page</span>\n                    ");
-  }
-
-function program9(depth0,data) {
-  
-  var buffer = '', helper, options;
-  data.buffer.push("\n                    <time datetime=\"");
-  data.buffer.push(escapeExpression(helpers.unbound.call(depth0, "post.published_at", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data})));
-  data.buffer.push("\" class=\"date published\">\n                        Published ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-format-timeago'] || (depth0 && depth0['gh-format-timeago']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data},helper ? helper.call(depth0, "post.published_at", options) : helperMissing.call(depth0, "gh-format-timeago", "post.published_at", options))));
-  data.buffer.push("\n                    </time>\n                    ");
-  return buffer;
-  }
-
-function program11(depth0,data) {
-  
-  
-  data.buffer.push("\n                    <span class=\"draft\">Draft</span>\n                    ");
-  }
-
-  data.buffer.push("<header class=\"page-header\">\n    <button class=\"menu-button js-menu-button\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "toggleGlobalMobileNav", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push("><span class=\"sr-only\">Menu</span></button>\n    <h2 class=\"page-title\">Content</h2>\n</header>\n\n<div class=\"page-content\">\n    <section ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'class': (":content-list :js-content-list postListFocused:keyboard-focused")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n        <header class=\"floatingheader\">\n            <section class=\"content-filter\">\n                <small>All Posts</small>\n            </section>\n            ");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'class': ("btn btn-green"),
-    'title': ("New Post")
-  },hashTypes:{'class': "STRING",'title': "STRING"},hashContexts:{'class': depth0,'title': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "editor.new", options) : helperMissing.call(depth0, "link-to", "editor.new", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n        </header>\n        ");
-  stack1 = helpers.view.call(depth0, "paginated-scroll-box", {hash:{
-    'tagName': ("section"),
-    'classNames': ("content-list-content js-content-scrollbox")
-  },hashTypes:{'tagName': "STRING",'classNames': "STRING"},hashContexts:{'tagName': depth0,'classNames': depth0},inverse:self.noop,fn:self.program(3, program3, data),contexts:[depth0],types:["STRING"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    </section>\n    <section ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'class': (":content-preview :js-content-preview postContentFocused:keyboard-focused")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n        ");
-  stack1 = helpers._triageMustache.call(depth0, "outlet", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    </section>\n</div>\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/posts/index', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, self=this, helperMissing=helpers.helperMissing;
-
-function program1(depth0,data) {
-  
-  var buffer = '', stack1, helper, options;
-  data.buffer.push("\n<div class=\"no-posts\">\n    <h3>You Haven't Written Any Posts Yet!</h3>\n    ");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(2, program2, data),contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "editor.new", options) : helperMissing.call(depth0, "link-to", "editor.new", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n</div>\n");
-  return buffer;
-  }
-function program2(depth0,data) {
-  
-  
-  data.buffer.push("<button type=\"button\" class=\"btn btn-green btn-lg\" title=\"New Post\">Write a new Post</button>");
-  }
-
-  stack1 = helpers['if'].call(depth0, "noPosts", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/posts/post', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression, self=this;
-
-function program1(depth0,data) {
-  
-  
-  data.buffer.push("Back");
-  }
-
-function program3(depth0,data) {
-  
-  
-  data.buffer.push("Published");
-  }
-
-function program5(depth0,data) {
-  
-  
-  data.buffer.push("Written");
-  }
-
-function program7(depth0,data) {
-  
-  var stack1;
-  stack1 = helpers._triageMustache.call(depth0, "author.name", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  else { data.buffer.push(''); }
-  }
-
-function program9(depth0,data) {
-  
-  var stack1;
-  stack1 = helpers._triageMustache.call(depth0, "author.email", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  else { data.buffer.push(''); }
-  }
-
-function program11(depth0,data) {
-  
-  
-  data.buffer.push(" Edit");
-  }
-
-function program13(depth0,data) {
-  
-  var buffer = '', stack1, helper, options;
-  data.buffer.push("\n    <div class=\"wrapper\">\n        <h1>");
-  stack1 = helpers._triageMustache.call(depth0, "title", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</h1>\n        ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-format-html'] || (depth0 && depth0['gh-format-html']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data},helper ? helper.call(depth0, "html", options) : helperMissing.call(depth0, "gh-format-html", "html", options))));
-  data.buffer.push("\n    </div>\n");
-  return buffer;
-  }
-
-  data.buffer.push("<header class=\"post-preview-header clearfix\">\n    ");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'tagName': ("button"),
-    'class': ("btn btn-default btn-back")
-  },hashTypes:{'tagName': "STRING",'class': "STRING"},hashContexts:{'tagName': depth0,'class': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "posts", options) : helperMissing.call(depth0, "link-to", "posts", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    <h2 class=\"page-title\">Preview</h2>\n    <button type=\"button\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'class': ("featured:featured:unfeatured")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(" title=\"Feature this post\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "toggleFeatured", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">\n        <span class=\"hidden\">Star</span>\n    </button>\n    <small class=\"post-published-by\">\n        <span class=\"status\">");
-  stack1 = helpers['if'].call(depth0, "isPublished", {hash:{},hashTypes:{},hashContexts:{},inverse:self.program(5, program5, data),fn:self.program(3, program3, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</span>\n        <span class=\"normal\">by</span>\n        <span class=\"author\">");
-  stack1 = helpers['if'].call(depth0, "author.name", {hash:{},hashTypes:{},hashContexts:{},inverse:self.program(9, program9, data),fn:self.program(7, program7, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</span>\n    </small>\n    <section class=\"post-controls\">\n        ");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'class': ("btn btn-default post-edit")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},inverse:self.noop,fn:self.program(11, program11, data),contexts:[depth0,depth0],types:["STRING","ID"],data:data},helper ? helper.call(depth0, "editor.edit", "", options) : helperMissing.call(depth0, "link-to", "editor.edit", "", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    </section>\n</header>\n\n");
-  stack1 = helpers.view.call(depth0, "content-preview-content-view", {hash:{
-    'tagName': ("section")
-  },hashTypes:{'tagName': "STRING"},hashContexts:{'tagName': depth0},inverse:self.noop,fn:self.program(13, program13, data),contexts:[depth0],types:["STRING"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/reset', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', helper, options, escapeExpression=this.escapeExpression, helperMissing=helpers.helperMissing;
-
-
-  data.buffer.push("<section class=\"reset-box js-reset-box fade-in\">\n    <form id=\"reset\" class=\"reset-form\" method=\"post\" novalidate=\"novalidate\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "submit", {hash:{
-    'on': ("submit")
-  },hashTypes:{'on': "STRING"},hashContexts:{'on': depth0},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">\n        <div class=\"password-wrap\">\n            ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'value': ("newPassword"),
-    'class': ("password"),
-    'type': ("password"),
-    'placeholder': ("Password"),
-    'name': ("newpassword"),
-    'autofocus': ("autofocus")
-  },hashTypes:{'value': "ID",'class': "STRING",'type': "STRING",'placeholder': "STRING",'name': "STRING",'autofocus': "STRING"},hashContexts:{'value': depth0,'class': depth0,'type': depth0,'placeholder': depth0,'name': depth0,'autofocus': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n        </div>\n        <div class=\"password-wrap\">\n            ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'value': ("ne2Password"),
-    'class': ("password"),
-    'type': ("password"),
-    'placeholder': ("Confirm Password"),
-    'name': ("ne2password")
-  },hashTypes:{'value': "ID",'class': "STRING",'type': "STRING",'placeholder': "STRING",'name': "STRING"},hashContexts:{'value': depth0,'class': depth0,'type': depth0,'placeholder': depth0,'name': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n        </div>\n        <button class=\"btn btn-blue\" type=\"submit\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'disabled': ("submitButtonDisabled")
-  },hashTypes:{'disabled': "STRING"},hashContexts:{'disabled': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">Reset Password</button>\n    </form>\n</section>\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/settings', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression, self=this;
-
-function program1(depth0,data) {
-  
-  var buffer = '', helper, options;
-  data.buffer.push("\n                ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-activating-list-item'] || (depth0 && depth0['gh-activating-list-item']),options={hash:{
-    'route': ("settings.general"),
-    'title': ("General"),
-    'classNames': ("settings-nav-general icon-settings")
-  },hashTypes:{'route': "STRING",'title': "STRING",'classNames': "STRING"},hashContexts:{'route': depth0,'title': depth0,'classNames': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-activating-list-item", options))));
-  data.buffer.push("\n            ");
-  return buffer;
-  }
-
-function program3(depth0,data) {
-  
-  var buffer = '', helper, options;
-  data.buffer.push("\n                ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-activating-list-item'] || (depth0 && depth0['gh-activating-list-item']),options={hash:{
-    'route': ("settings.users"),
-    'title': ("Users"),
-    'classNames': ("settings-nav-users icon-users")
-  },hashTypes:{'route': "STRING",'title': "STRING",'classNames': "STRING"},hashContexts:{'route': depth0,'title': depth0,'classNames': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-activating-list-item", options))));
-  data.buffer.push("\n            ");
-  return buffer;
-  }
-
-function program5(depth0,data) {
-  
-  var buffer = '', helper, options;
-  data.buffer.push("\n                ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-activating-list-item'] || (depth0 && depth0['gh-activating-list-item']),options={hash:{
-    'route': ("settings.tags"),
-    'title': ("Tags"),
-    'classNames': ("settings-nav-tags icon-tag")
-  },hashTypes:{'route': "STRING",'title': "STRING",'classNames': "STRING"},hashContexts:{'route': depth0,'title': depth0,'classNames': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-activating-list-item", options))));
-  data.buffer.push("\n            ");
-  return buffer;
-  }
-
-function program7(depth0,data) {
-  
-  var buffer = '', helper, options;
-  data.buffer.push("\n                ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-activating-list-item'] || (depth0 && depth0['gh-activating-list-item']),options={hash:{
-    'route': ("settings.code-injection"),
-    'title': ("Code Injection"),
-    'classNames': ("settings-nav-code icon-code")
-  },hashTypes:{'route': "STRING",'title': "STRING",'classNames': "STRING"},hashContexts:{'route': depth0,'title': depth0,'classNames': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-activating-list-item", options))));
-  data.buffer.push("\n            ");
-  return buffer;
-  }
-
-function program9(depth0,data) {
-  
-  var buffer = '', helper, options;
-  data.buffer.push("\n                ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-activating-list-item'] || (depth0 && depth0['gh-activating-list-item']),options={hash:{
-    'route': ("settings.labs"),
-    'title': ("Labs"),
-    'classNames': ("settings-nav-labs icon-atom")
-  },hashTypes:{'route': "STRING",'title': "STRING",'classNames': "STRING"},hashContexts:{'route': depth0,'title': depth0,'classNames': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-activating-list-item", options))));
-  data.buffer.push("\n            ");
-  return buffer;
-  }
-
-function program11(depth0,data) {
-  
-  var buffer = '', helper, options;
-  data.buffer.push("\n                ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-activating-list-item'] || (depth0 && depth0['gh-activating-list-item']),options={hash:{
-    'route': ("settings.about"),
-    'title': ("About"),
-    'classNames': ("settings-nav-about icon-pacman")
-  },hashTypes:{'route': "STRING",'title': "STRING",'classNames': "STRING"},hashContexts:{'route': depth0,'title': depth0,'classNames': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-activating-list-item", options))));
-  data.buffer.push("\n            ");
-  return buffer;
-  }
-
-  data.buffer.push("<header class=\"page-header\">\n    <button class=\"menu-button js-menu-button\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "toggleGlobalMobileNav", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push("><span class=\"sr-only\">Menu</span></button>\n    <h2 class=\"page-title\">Settings</h2>\n</header>\n\n<div class=\"page-content\">\n    <nav class=\"settings-nav js-settings-menu\">\n        <ul>\n\n            ");
-  stack1 = helpers['if'].call(depth0, "showGeneral", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n\n            ");
-  stack1 = helpers['if'].call(depth0, "showUsers", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(3, program3, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n\n            ");
-  stack1 = helpers['if'].call(depth0, "showTags", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(5, program5, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n\n            ");
-  stack1 = helpers['if'].call(depth0, "showCodeInjection", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(7, program7, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n\n            ");
-  stack1 = helpers['if'].call(depth0, "showLabs", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(9, program9, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n\n            ");
-  stack1 = helpers['if'].call(depth0, "showAbout", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(11, program11, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n        </ul>\n    </nav>\n\n    ");
-  stack1 = helpers._triageMustache.call(depth0, "outlet", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n</div>\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/settings/about', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, self=this, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression;
-
-function program1(depth0,data) {
-  
-  
-  data.buffer.push("Back");
-  }
-
-function program3(depth0,data) {
-  
-  var stack1;
-  stack1 = helpers._triageMustache.call(depth0, "mail", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  else { data.buffer.push(''); }
-  }
-
-function program5(depth0,data) {
-  
-  
-  data.buffer.push("Native");
-  }
-
-  data.buffer.push("<header class=\"settings-view-header\">\n    <h2 class=\"page-title\">About</h2>\n    <div class=\"js-settings-header-inner settings-header-inner\">\n        ");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'class': ("btn btn-default btn-back")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "settings", options) : helperMissing.call(depth0, "link-to", "settings", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    </div>\n</header>\n\n<section class=\"content settings-about\">\n    <section class=\"about-ghost-intro\">\n        <h1>\n            <span class=\"ghost_logo\">\n                <span class=\"hidden\">Ghost</span>\n            </span>\n            <span class=\"version blue\">v");
-  stack1 = helpers._triageMustache.call(depth0, "version", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</span>\n        </h1>\n        <p>A free, open, simple publishing platform</p>\n\n        <div class=\"about-environment-help clearfix\">\n            <div class=\"about-environment\">\n                <dl>\n                    <dt>Version:</dt>\n                    <dd class=\"about-environment-detail\">");
-  stack1 = helpers._triageMustache.call(depth0, "version", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</dd>\n                    <dt>Environment:</dt>\n                    <dd class=\"about-environment-detail\">");
-  stack1 = helpers._triageMustache.call(depth0, "environment", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</dd>\n                    <dt>Database:</dt>\n                    <dd class=\"about-environment-detail about-environment-database\">");
-  stack1 = helpers._triageMustache.call(depth0, "database", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</dd>\n                    <dt>Mail:</dt>\n                    <dd class=\"about-environment-detail\">");
-  stack1 = helpers['if'].call(depth0, "mail", {hash:{},hashTypes:{},hashContexts:{},inverse:self.program(5, program5, data),fn:self.program(3, program3, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</dd>\n                </dl>\n            </div>\n            <div class=\"about-help\">\n                <a href=\"http://support.ghost.org\" class=\"btn\">User Documentation</a>\n                <a href=\"https://ghost.org/forum/\" class=\"btn\">Get Help With Ghost</a>\n            </div>\n        </div>\n    </section>\n\n    <section class=\"about-credits\">\n        <h1>The People Who Made it Possible</h1>\n\n        <ul class=\"top-contributors clearfix\">\n            ");
-  data.buffer.push(escapeExpression((helper = helpers.partial || (depth0 && depth0.partial),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "contributors", options) : helperMissing.call(depth0, "partial", "contributors", options))));
-  data.buffer.push("\n        </ul>\n\n        <p class=\"about-contributors-info\">Ghost is built by an incredible group of contributors from all over the world. Here are just a few of the people who helped create the version you’re using right now.</p>\n\n        <a href=\"https://ghost.org/about/contribute/\" class=\"about-get-involved btn-blue btn-lg btn\">Find out how you can get involved</a>\n\n        <p class=\"about-copyright\">\n            Copyright 2013 - 2014 Ghost Foundation, released under the <a href=\"https://github.com/TryGhost/Ghost/blob/master/LICENSE\">MIT license</a>.\n            <br>\n            <a href=\"https://ghost.org/\">Ghost</a> is a trademark of the <a href=\"https://ghost.org/about/\">Ghost Foundation</a>.\n        </p>\n    </section>\n</section>\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/settings/apps', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, self=this, escapeExpression=this.escapeExpression, helperMissing=helpers.helperMissing;
-
-function program1(depth0,data) {
-  
-  
-  data.buffer.push("Back");
-  }
-
-function program3(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n        <tr>\n            <td>\n                ");
-  stack1 = helpers['if'].call(depth0, "app.package", {hash:{},hashTypes:{},hashContexts:{},inverse:self.program(6, program6, data),fn:self.program(4, program4, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n            </td>\n            <td>\n                <button type=\"button\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "toggleApp", "app", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["ID","ID"],data:data})));
-  data.buffer.push(" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'class': (":btn :js-button-active activeClass:btn-red inactiveClass:btn-green activeClass:js-button-deactivate")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n                    ");
-  stack1 = helpers._triageMustache.call(depth0, "app.buttonText", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n                </button>\n            </td>\n        </tr>\n        ");
-  return buffer;
-  }
-function program4(depth0,data) {
-  
-  var buffer = '', stack1;
-  stack1 = helpers._triageMustache.call(depth0, "app.package.name", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push(" - ");
-  stack1 = helpers._triageMustache.call(depth0, "app.package.version", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  return buffer;
-  }
-
-function program6(depth0,data) {
-  
-  var buffer = '', stack1;
-  stack1 = helpers._triageMustache.call(depth0, "app.name", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push(" - package.json missing :(");
-  return buffer;
-  }
-
-  data.buffer.push("<header class=\"settings-view-header\">\n    ");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'class': ("btn btn-default")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "settings", options) : helperMissing.call(depth0, "link-to", "settings", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    <h2 class=\"title\">Apps</h2>\n</header>\n\n<section class=\"content settings-apps\">\n    <table class=\"js-apps\">\n        <thead>\n            <th>App name</th>\n            <th>Status</th>\n        </thead>\n        <tbody>\n        ");
-  stack1 = helpers.each.call(depth0, "app", "in", "model", {hash:{
-    'itemController': ("settings/app")
-  },hashTypes:{'itemController': "STRING"},hashContexts:{'itemController': depth0},inverse:self.noop,fn:self.program(3, program3, data),contexts:[depth0,depth0,depth0],types:["ID","ID","ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n        </tbody>\n    </table>\n</section>\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/settings/code-injection', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, self=this, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression;
-
-function program1(depth0,data) {
-  
-  
-  data.buffer.push("Back");
-  }
-
-  data.buffer.push("<header class=\"settings-view-header\">\n    ");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'class': ("btn btn-default btn-back")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "settings", options) : helperMissing.call(depth0, "link-to", "settings", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    <h2 class=\"page-title\">Code Injection</h2>\n    <section class=\"page-actions\">\n        <button type=\"button\" class=\"btn btn-blue\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "save", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">Save</button>\n    </section>\n</header>\n\n<section class=\"content settings-code\">\n    <form id=\"settings-code\" novalidate=\"novalidate\">\n        <fieldset>\n            <div class=\"form-group\">\n                <p>\n                    Ghost allows you to inject code into the top and bottom of your template files without editing them. This allows for quick modifications to insert useful things like tracking codes and meta data.\n                </p>\n            </div>\n\n            <div class=\"form-group\">\n                <label for=\"ghost-head\">Blog Header</label>\n                <p>Code here will be injected to the {{ghost_head}} helper at the top of your page</p>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.textarea || (depth0 && depth0.textarea),options={hash:{
-    'id': ("ghost-head"),
-    'name': ("codeInjection[ghost_head]"),
-    'type': ("text"),
-    'value': ("ghost_head")
-  },hashTypes:{'id': "STRING",'name': "STRING",'type': "STRING",'value': "ID"},hashContexts:{'id': depth0,'name': depth0,'type': depth0,'value': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "textarea", options))));
-  data.buffer.push("\n            </div>\n\n            <div class=\"form-group\">\n                <label for=\"ghost-foot\">Blog Footer</label>\n                <p>Code here will be injected to the {{ghost_foot}} helper at the bottom of your page</p>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.textarea || (depth0 && depth0.textarea),options={hash:{
-    'id': ("ghost-foot"),
-    'name': ("codeInjection[ghost_foot]"),
-    'type': ("text"),
-    'value': ("ghost_foot")
-  },hashTypes:{'id': "STRING",'name': "STRING",'type': "STRING",'value': "ID"},hashContexts:{'id': depth0,'name': depth0,'type': depth0,'value': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "textarea", options))));
-  data.buffer.push("\n            </div>\n        </fieldset>\n    </form>\n</section>\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/settings/general', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, escapeExpression=this.escapeExpression, self=this, helperMissing=helpers.helperMissing;
-
-function program1(depth0,data) {
-  
-  
-  data.buffer.push("Back");
-  }
-
-function program3(depth0,data) {
-  
-  var buffer = '';
-  data.buffer.push("\n                <button type=\"button\" class=\"js-modal-logo\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "openModal", "upload", "", "logo", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0,depth0,depth0],types:["STRING","STRING","ID","STRING"],data:data})));
-  data.buffer.push("><img id=\"blog-logo\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'src': ("logo")
-  },hashTypes:{'src': "ID"},hashContexts:{'src': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(" alt=\"logo\"></button>\n            ");
-  return buffer;
-  }
-
-function program5(depth0,data) {
-  
-  var buffer = '';
-  data.buffer.push("\n                <button type=\"button\" class=\"btn btn-green js-modal-logo\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "openModal", "upload", "", "logo", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0,depth0,depth0],types:["STRING","STRING","ID","STRING"],data:data})));
-  data.buffer.push(">Upload Image</button>\n            ");
-  return buffer;
-  }
-
-function program7(depth0,data) {
-  
-  var buffer = '';
-  data.buffer.push("\n                <button type=\"button\" class=\"js-modal-cover\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "openModal", "upload", "", "cover", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0,depth0,depth0],types:["STRING","STRING","ID","STRING"],data:data})));
-  data.buffer.push("><img id=\"blog-cover\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'src': ("cover")
-  },hashTypes:{'src': "ID"},hashContexts:{'src': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(" alt=\"cover photo\"></button>\n            ");
-  return buffer;
-  }
-
-function program9(depth0,data) {
-  
-  var buffer = '';
-  data.buffer.push("\n                <button type=\"button\" class=\"btn btn-green js-modal-cover\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "openModal", "upload", "", "cover", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0,depth0,depth0],types:["STRING","STRING","ID","STRING"],data:data})));
-  data.buffer.push(">Upload Image</button>\n            ");
-  return buffer;
-  }
-
-  data.buffer.push("<header class=\"settings-view-header\">\n    ");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'class': ("btn btn-default btn-back")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "settings", options) : helperMissing.call(depth0, "link-to", "settings", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    <h2 class=\"page-title\">General</h2>\n    <section class=\"page-actions\">\n        <button type=\"button\" class=\"btn btn-blue\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "save", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">Save</button>\n    </section>\n</header>\n\n<section class=\"content settings-general\">\n    <form id=\"settings-general\" novalidate=\"novalidate\">\n        <fieldset>\n\n            <div class=\"form-group\">\n                <label for=\"blog-title\">Blog Title</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'id': ("blog-title"),
-    'name': ("general[title]"),
-    'type': ("text"),
-    'value': ("title")
-  },hashTypes:{'id': "STRING",'name': "STRING",'type': "STRING",'value': "ID"},hashContexts:{'id': depth0,'name': depth0,'type': depth0,'value': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n                <p>The name of your blog</p>\n            </div>\n\n            <div class=\"form-group description-container\">\n                <label for=\"blog-description\">Blog Description</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.textarea || (depth0 && depth0.textarea),options={hash:{
-    'id': ("blog-description"),
-    'name': ("general[description]"),
-    'value': ("description")
-  },hashTypes:{'id': "STRING",'name': "STRING",'value': "ID"},hashContexts:{'id': depth0,'name': depth0,'value': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "textarea", options))));
-  data.buffer.push("\n                <p>\n                    Describe what your blog is about\n                    ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-count-characters'] || (depth0 && depth0['gh-count-characters']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data},helper ? helper.call(depth0, "description", options) : helperMissing.call(depth0, "gh-count-characters", "description", options))));
-  data.buffer.push("\n                </p>\n\n            </div>\n        </fieldset>\n\n        <div class=\"form-group\">\n            <label for=\"blog-logo\">Blog Logo</label>\n            ");
-  stack1 = helpers['if'].call(depth0, "logo", {hash:{},hashTypes:{},hashContexts:{},inverse:self.program(5, program5, data),fn:self.program(3, program3, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n            <p>Display a sexy logo for your publication</p>\n        </div>\n\n        <div class=\"form-group\">\n            <label for=\"blog-cover\">Blog Cover</label>\n            ");
-  stack1 = helpers['if'].call(depth0, "cover", {hash:{},hashTypes:{},hashContexts:{},inverse:self.program(9, program9, data),fn:self.program(7, program7, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n            <p>Display a cover image on your site</p>\n        </div>\n\n        <fieldset>\n            <div class=\"form-group\">\n                <label for=\"email-address\">Email Address</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'id': ("email-address"),
-    'name': ("general[email-address]"),
-    'type': ("email"),
-    'value': ("email"),
-    'autocapitalize': ("off"),
-    'autocorrect': ("off")
-  },hashTypes:{'id': "STRING",'name': "STRING",'type': "STRING",'value': "ID",'autocapitalize': "STRING",'autocorrect': "STRING"},hashContexts:{'id': depth0,'name': depth0,'type': depth0,'value': depth0,'autocapitalize': depth0,'autocorrect': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n                <p>Address to use for admin notifications</p>\n            </div>\n\n            <div class=\"form-group\">\n                <label for=\"postsPerPage\">Posts per page</label>\n                \n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'id': ("postsPerPage"),
-    'name': ("general[postsPerPage]"),
-    'focus-out': ("checkPostsPerPage"),
-    'value': ("postsPerPage"),
-    'min': ("1"),
-    'max': ("1000"),
-    'type': ("number"),
-    'pattern': ("[0-9]*")
-  },hashTypes:{'id': "STRING",'name': "STRING",'focus-out': "STRING",'value': "ID",'min': "STRING",'max': "STRING",'type': "STRING",'pattern': "STRING"},hashContexts:{'id': depth0,'name': depth0,'focus-out': depth0,'value': depth0,'min': depth0,'max': depth0,'type': depth0,'pattern': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n                <p>How many posts should be displayed on each page</p>\n            </div>\n\n            <div class=\"form-group for-checkbox\">\n                <label for=\"permalinks\">Dated Permalinks</label>\n                <label class=\"checkbox\" for=\"permalinks\">\n                    ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'id': ("permalinks"),
-    'name': ("general[permalinks]"),
-    'type': ("checkbox"),
-    'checked': ("isDatedPermalinks")
-  },hashTypes:{'id': "STRING",'name': "STRING",'type': "STRING",'checked': "ID"},hashContexts:{'id': depth0,'name': depth0,'type': depth0,'checked': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n                    <span class=\"input-toggle-component\"></span>\n                    <p>Include the date in your post URLs</p>\n                </label>\n            </div>\n\n            <div class=\"form-group for-select\">\n                <label for=\"activeTheme\">Theme</label>\n                <span class=\"gh-select\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'data-select-text': ("selectedTheme.label")
-  },hashTypes:{'data-select-text': "ID"},hashContexts:{'data-select-text': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(" tabindex=\"0\">\n                   ");
-  data.buffer.push(escapeExpression(helpers.view.call(depth0, "select", {hash:{
-    'id': ("activeTheme"),
-    'name': ("general[activeTheme]"),
-    'content': ("themes"),
-    'optionValuePath': ("content.name"),
-    'optionLabelPath': ("content.label"),
-    'value': ("activeTheme"),
-    'selection': ("selectedTheme")
-  },hashTypes:{'id': "STRING",'name': "STRING",'content': "ID",'optionValuePath': "STRING",'optionLabelPath': "STRING",'value': "ID",'selection': "ID"},hashContexts:{'id': depth0,'name': depth0,'content': depth0,'optionValuePath': depth0,'optionLabelPath': depth0,'value': depth0,'selection': depth0},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push("\n               </span>\n                <p>Select a theme for your blog</p>\n            </div>\n        </fieldset>\n    </form>\n</section>");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/settings/labs', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression, self=this;
-
-function program1(depth0,data) {
-  
-  
-  data.buffer.push("Back");
-  }
-
-function program3(depth0,data) {
-  
-  var buffer = '', helper, options;
-  data.buffer.push("\n        <fieldset>\n            <div class=\"form-group\">\n                <label>Import</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.partial || (depth0 && depth0.partial),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "import-errors", options) : helperMissing.call(depth0, "partial", "import-errors", options))));
-  data.buffer.push("\n                ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-file-upload'] || (depth0 && depth0['gh-file-upload']),options={hash:{
-    'id': ("importfile"),
-    'uploadButtonText': ("uploadButtonText")
-  },hashTypes:{'id': "STRING",'uploadButtonText': "ID"},hashContexts:{'id': depth0,'uploadButtonText': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-file-upload", options))));
-  data.buffer.push("\n                <p>Import from another Ghost installation. If you import a user, this will replace the current user & log you out.</p>\n            </div>\n        </fieldset>\n    ");
-  return buffer;
-  }
-
-  data.buffer.push("<header class=\"settings-view-header\">\n    <h2 class=\"page-title\">Labs</h2>\n    <div class=\"js-settings-header-inner settings-header-inner\">\n        ");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'class': ("btn btn-default btn-back")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "settings", options) : helperMissing.call(depth0, "link-to", "settings", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    </div>\n</header>\n\n\n<section class=\"content settings-debug\">\n    <form id=\"settings-export\">\n        <fieldset>\n            <div class=\"form-group\">\n                <label>Export</label>\n                <button type=\"button\" class=\"btn btn-blue\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "exportData", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">Export</button>\n                <p>Export the blog settings and data.</p>\n            </div>\n        </fieldset>\n    </form>\n    ");
-  stack1 = (helper = helpers['gh-form'] || (depth0 && depth0['gh-form']),options={hash:{
-    'id': ("settings-import"),
-    'enctype': ("multipart/form-data")
-  },hashTypes:{'id': "STRING",'enctype': "STRING"},hashContexts:{'id': depth0,'enctype': depth0},inverse:self.noop,fn:self.program(3, program3, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-form", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    <form id=\"settings-resetdb\">\n        <fieldset>\n            <div class=\"form-group\">\n                <label>Delete all Content</label>\n                <button type=\"button\" class=\"btn btn-red js-delete\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "openModal", "deleteAll", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data})));
-  data.buffer.push(">Delete</button>\n                <p>Delete all posts and tags from the database.</p>\n            </div>\n        </fieldset>\n    </form>\n    <form id=\"settings-testmail\">\n        <fieldset>\n            <div class=\"form-group\">\n                <label>Send a test email</label>\n                <button type=\"button\" id=\"sendtestmail\" class=\"btn btn-blue\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "sendTestEmail", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">Send</button>\n                <p>Sends a test email to your address.</p>\n            </div>\n        </fieldset>\n    </form>\n</section>\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/settings/tags', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, escapeExpression=this.escapeExpression, self=this;
-
-function program1(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n        <div class=\"settings-tag\">\n            <button class=\"tag-edit-button\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "editTag", "tag", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","ID"],data:data})));
-  data.buffer.push(">\n                <span class=\"tag-title\">");
-  stack1 = helpers._triageMustache.call(depth0, "tag.name", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</span>\n                <span class=\"label label-default\">/");
-  stack1 = helpers._triageMustache.call(depth0, "tag.slug", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</span>\n                <p class=\"tag-description\">");
-  stack1 = helpers._triageMustache.call(depth0, "tag.description", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</p>\n                <span class=\"tags-count\">N/A</span>\n            </button>\n        </div>\n    ");
-  return buffer;
-  }
-
-  data.buffer.push("<header class=\"settings-view-header\">\n    <a class=\"btn btn-default btn-back active\" href=\"/ghost/settings/\">Back</a>\n    <h2 class=\"page-title\">Tags</h2>\n    <section class=\"page-actions\">\n        <button type=\"button\" class=\"btn btn-green\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "newTag", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">New Tag</button>\n    </section>\n</header>\n\n<section class=\"content settings-tags\">\n    ");
-  stack1 = helpers.each.call(depth0, "tag", "in", "tags", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0,depth0,depth0],types:["ID","ID","ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n</section>\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/settings/tags/settings-menu', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, escapeExpression=this.escapeExpression, helperMissing=helpers.helperMissing, self=this, functionType="function", blockHelperMissing=helpers.blockHelperMissing;
-
-function program1(depth0,data) {
-  
-  var buffer = '', stack1, helper, options;
-  data.buffer.push("\n    <div ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'class': ("isViewingSubview:settings-menu-pane-out-left:settings-menu-pane-in :settings-menu :settings-menu-pane")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n        <div class=\"settings-menu-header\">\n            <h4>Tag Settings</h4>\n            <button class=\"close icon-x settings-menu-header-action\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "closeSettingsMenu", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">\n                <span class=\"hidden\">Close</span>\n            </button>\n        </div>\n        <div class=\"settings-menu-content\">\n            ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-uploader'] || (depth0 && depth0['gh-uploader']),options={hash:{
-    'uploaded': ("setCoverImage"),
-    'canceled': ("clearCoverImage"),
-    'description': ("Add tag image"),
-    'image': ("activeTag.image"),
-    'uploaderReference': ("uploaderReference"),
-    'tagName': ("section")
-  },hashTypes:{'uploaded': "STRING",'canceled': "STRING",'description': "STRING",'image': "ID",'uploaderReference': "ID",'tagName': "STRING"},hashContexts:{'uploaded': depth0,'canceled': depth0,'description': depth0,'image': depth0,'uploaderReference': depth0,'tagName': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-uploader", options))));
-  data.buffer.push("\n            <form>\n                <div class=\"form-group\">\n                    <label>Tag Name</label>\n                    ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-input'] || (depth0 && depth0['gh-input']),options={hash:{
-    'type': ("text"),
-    'value': ("activeTagNameScratch"),
-    'focus-out': ("saveActiveTagName")
-  },hashTypes:{'type': "STRING",'value': "ID",'focus-out': "STRING"},hashContexts:{'type': depth0,'value': depth0,'focus-out': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-input", options))));
-  data.buffer.push("\n                </div>\n\n                <div class=\"form-group\">\n                    <label>Slug</label>\n                    ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-input'] || (depth0 && depth0['gh-input']),options={hash:{
-    'type': ("text"),
-    'value': ("activeTagSlugScratch"),
-    'focus-out': ("saveActiveTagSlug")
-  },hashTypes:{'type': "STRING",'value': "ID",'focus-out': "STRING"},hashContexts:{'type': depth0,'value': depth0,'focus-out': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-input", options))));
-  data.buffer.push("\n                </div>\n\n                <div class=\"form-group\">\n                    <label>Description</label>\n                    ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-textarea'] || (depth0 && depth0['gh-textarea']),options={hash:{
-    'value': ("activeTagDescriptionScratch"),
-    'focus-out': ("saveActiveTagDescription")
-  },hashTypes:{'value': "ID",'focus-out': "STRING"},hashContexts:{'value': depth0,'focus-out': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-textarea", options))));
-  data.buffer.push("\n                </div>\n\n                <ul class=\"nav-list nav-list-block\">\n                    ");
-  stack1 = (helper = helpers['gh-tab'] || (depth0 && depth0['gh-tab']),options={hash:{
-    'tagName': ("li"),
-    'classNames': ("nav-list-item")
-  },hashTypes:{'tagName': "STRING",'classNames': "STRING"},hashContexts:{'tagName': depth0,'classNames': depth0},inverse:self.noop,fn:self.program(2, program2, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-tab", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n                </ul>\n\n                ");
-  stack1 = helpers.unless.call(depth0, "activeTag.isNew", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(4, program4, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n            </form>\n        </div>\n    </div>\n\n    <div ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'class': ("isViewingSubview:settings-menu-pane-in:settings-menu-pane-out-right :settings-menu :settings-menu-pane")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n        ");
-  options={hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(6, program6, data),contexts:[],types:[],data:data}
-  if (helper = helpers['gh-tab-pane']) { stack1 = helper.call(depth0, options); }
-  else { helper = (depth0 && depth0['gh-tab-pane']); stack1 = typeof helper === functionType ? helper.call(depth0, options) : helper; }
-  if (!helpers['gh-tab-pane']) { stack1 = blockHelperMissing.call(depth0, 'gh-tab-pane', {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(6, program6, data),contexts:[],types:[],data:data}); }
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    </div>\n");
-  return buffer;
-  }
-function program2(depth0,data) {
-  
-  
-  data.buffer.push("\n                        <button type=\"button\">\n                            <b>Meta Data</b>\n                            <span>Extra content for SEO and social media.</span>\n                        </button>\n                    ");
-  }
-
-function program4(depth0,data) {
-  
-  var buffer = '';
-  data.buffer.push("\n                    <button type=\"button\" class=\"btn btn-red icon-trash\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "deleteTag", "activeTag", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","ID"],data:data})));
-  data.buffer.push(">Delete Tag</button>\n                ");
-  return buffer;
-  }
-
-function program6(depth0,data) {
-  
-  var buffer = '', stack1, helper, options;
-  data.buffer.push("\n            <div class=\"settings-menu-header subview\">\n                <button ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "closeSubview", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(" class=\"back icon-chevron-left settings-menu-header-action\"><span class=\"hidden\">Back</span></button>\n                <h4>Meta Data</h4>\n            </div>\n\n            <div class=\"settings-menu-content\">\n                <form>\n                <div class=\"form-group\">\n                    <label for=\"meta-title\">Meta Title</label>\n                    ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-input'] || (depth0 && depth0['gh-input']),options={hash:{
-    'type': ("text"),
-    'value': ("activeTagMetaTitleScratch"),
-    'focus-out': ("saveActiveTagMetaTitle")
-  },hashTypes:{'type': "STRING",'value': "ID",'focus-out': "STRING"},hashContexts:{'type': depth0,'value': depth0,'focus-out': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-input", options))));
-  data.buffer.push("\n                    <p>Recommended: <b>70</b> characters. You’ve used ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-count-down-characters'] || (depth0 && depth0['gh-count-down-characters']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["ID","INTEGER"],data:data},helper ? helper.call(depth0, "activeTagMetaTitleScratch", 70, options) : helperMissing.call(depth0, "gh-count-down-characters", "activeTagMetaTitleScratch", 70, options))));
-  data.buffer.push("</p>\n                </div>\n\n                <div class=\"form-group\">\n                    <label for=\"meta-description\">Meta Description</label>\n                    ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-textarea'] || (depth0 && depth0['gh-textarea']),options={hash:{
-    'value': ("activeTagMetaDescriptionScratch"),
-    'focus-out': ("saveActiveTagMetaDescription")
-  },hashTypes:{'value': "ID",'focus-out': "STRING"},hashContexts:{'value': depth0,'focus-out': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-textarea", options))));
-  data.buffer.push("\n                    <p>Recommended: <b>156</b> characters. You’ve used ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-count-down-characters'] || (depth0 && depth0['gh-count-down-characters']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["ID","INTEGER"],data:data},helper ? helper.call(depth0, "activeTagMetaDescriptionScratch", 156, options) : helperMissing.call(depth0, "gh-count-down-characters", "activeTagMetaDescriptionScratch", 156, options))));
-  data.buffer.push("</p>\n                </div>\n\n                <div class=\"form-group\">\n                    <label>Search Engine Result Preview</label>\n                    <div class=\"seo-preview\">\n                        <div class=\"seo-preview-title\">");
-  stack1 = helpers._triageMustache.call(depth0, "seoTitle", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</div>\n                        <div class=\"seo-preview-link\">");
-  stack1 = helpers._triageMustache.call(depth0, "seoURL", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</div>\n                        <div class=\"seo-preview-description\">");
-  stack1 = helpers._triageMustache.call(depth0, "seoDescription", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</div>\n                    </div>\n                </form>\n            </div>\n        ");
-  return buffer;
-  }
-
-  data.buffer.push("<div class=\"content-cover\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "closeSettingsMenu", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push("></div>\n");
-  stack1 = (helper = helpers['gh-tabs-manager'] || (depth0 && depth0['gh-tabs-manager']),options={hash:{
-    'selected': ("showSubview"),
-    'class': ("settings-menu-container")
-  },hashTypes:{'selected': "STRING",'class': "STRING"},hashContexts:{'selected': depth0,'class': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-tabs-manager", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/settings/users', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1;
-
-
-  data.buffer.push("\n");
-  stack1 = helpers._triageMustache.call(depth0, "outlet", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/settings/users/index', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, self=this, escapeExpression=this.escapeExpression, helperMissing=helpers.helperMissing;
-
-function program1(depth0,data) {
-  
-  var buffer = '', stack1, helper, options;
-  data.buffer.push("\n    <header class=\"settings-view-header user-list-header\">\n        ");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'class': ("btn btn-default btn-back")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},inverse:self.noop,fn:self.program(2, program2, data),contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "settings", options) : helperMissing.call(depth0, "link-to", "settings", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n        <h2 class=\"page-title\">Users</h2>\n        <section class=\"page-actions\">\n            <button class=\"btn btn-green\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "openModal", "invite-new-user", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0],types:["STRING","STRING"],data:data})));
-  data.buffer.push(" >New&nbsp;User</button>\n        </section>\n    </header>\n\n    <section class=\"content settings-users\">\n\n    ");
-  stack1 = helpers['if'].call(depth0, "invitedUsers", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(4, program4, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n\n    <section class=\"user-list active-users\">\n\n        <h4 class=\"user-list-title\">Active users</h4>\n\n        ");
-  stack1 = helpers.each.call(depth0, "user", "in", "activeUsers", {hash:{
-    'itemController': ("settings/users/user")
-  },hashTypes:{'itemController': "STRING"},hashContexts:{'itemController': depth0},inverse:self.noop,fn:self.program(10, program10, data),contexts:[depth0,depth0,depth0],types:["ID","ID","ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n\n    </section>\n\n    </section>\n\n");
-  return buffer;
-  }
-function program2(depth0,data) {
-  
-  
-  data.buffer.push("Back");
-  }
-
-function program4(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n\n        <section class=\"user-list invited-users\">\n\n            <h4 class=\"user-list-title\">Invited users</h4>\n\n            ");
-  stack1 = helpers.each.call(depth0, "user", "in", "invitedUsers", {hash:{
-    'itemController': ("settings/users/user")
-  },hashTypes:{'itemController': "STRING"},hashContexts:{'itemController': depth0},inverse:self.noop,fn:self.program(5, program5, data),contexts:[depth0,depth0,depth0],types:["ID","ID","ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n\n        </section>\n\n    ");
-  return buffer;
-  }
-function program5(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n                <div class=\"user-list-item\">\n                    <span class=\"user-list-item-icon icon-mail\">ic</span>\n\n                    <div class=\"user-list-item-body\">\n                        <span class=\"name\">");
-  stack1 = helpers._triageMustache.call(depth0, "user.email", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</span><br>\n                            ");
-  stack1 = helpers['if'].call(depth0, "user.pending", {hash:{},hashTypes:{},hashContexts:{},inverse:self.program(8, program8, data),fn:self.program(6, program6, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n                    </div>\n                    <aside class=\"user-list-item-aside\">\n                        <a class=\"user-list-action\" href=\"#\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "revoke", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">Revoke</a>\n                        <a class=\"user-list-action\" href=\"#\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "resend", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">Resend</a>\n                    </aside>\n                </div>\n            ");
-  return buffer;
-  }
-function program6(depth0,data) {
-  
-  
-  data.buffer.push("\n                                <span class=\"red\">Invitation not sent - please try again</span>\n                            ");
-  }
-
-function program8(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n                                <span class=\"description\">Invitation sent: ");
-  stack1 = helpers._triageMustache.call(depth0, "user.created_at", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</span>\n                            ");
-  return buffer;
-  }
-
-function program10(depth0,data) {
-  
-  var buffer = '', stack1, helper, options;
-  data.buffer.push("\n            ");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'class': ("user-list-item")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},inverse:self.noop,fn:self.program(11, program11, data),contexts:[depth0,depth0],types:["STRING","ID"],data:data},helper ? helper.call(depth0, "settings.users.user", "user", options) : helperMissing.call(depth0, "link-to", "settings.users.user", "user", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n        ");
-  return buffer;
-  }
-function program11(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n                <span class=\"user-list-item-figure\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'style': ("user.image")
-  },hashTypes:{'style': "ID"},hashContexts:{'style': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n                    <span class=\"hidden\">Photo of ");
-  data.buffer.push(escapeExpression(helpers.unbound.call(depth0, "user.name", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data})));
-  data.buffer.push("</span>\n                </span>\n\n                <div class=\"user-list-item-body\">\n                    <span class=\"name\">\n                        ");
-  stack1 = helpers._triageMustache.call(depth0, "user.name", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n                    </span>\n                    <br>\n                    <span class=\"description\">Last seen: ");
-  data.buffer.push(escapeExpression(helpers.unbound.call(depth0, "user.last_login", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data})));
-  data.buffer.push("</span>\n                </div>\n                <aside class=\"user-list-item-aside\">\n                    ");
-  stack1 = helpers.unless.call(depth0, "user.isAuthor", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(12, program12, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n                </aside>\n            ");
-  return buffer;
-  }
-function program12(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n                        ");
-  stack1 = helpers.each.call(depth0, "role", "in", "user.roles", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(13, program13, data),contexts:[depth0,depth0,depth0],types:["ID","ID","ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n                    ");
-  return buffer;
-  }
-function program13(depth0,data) {
-  
-  var buffer = '', stack1;
-  data.buffer.push("\n                            <span class=\"role-label ");
-  data.buffer.push(escapeExpression(helpers.unbound.call(depth0, "role.lowerCaseName", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data})));
-  data.buffer.push("\">");
-  stack1 = helpers._triageMustache.call(depth0, "role.name", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</span>\n                        ");
-  return buffer;
-  }
-
-  stack1 = helpers.view.call(depth0, "settings/users/users-list-view", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["STRING"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/settings/users/user', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, self=this, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression;
-
-function program1(depth0,data) {
-  
-  var buffer = '', stack1, helper, options;
-  data.buffer.push("\n        ");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'class': ("btn btn-default btn-back"),
-    'tagName': ("button")
-  },hashTypes:{'class': "STRING",'tagName': "STRING"},hashContexts:{'class': depth0,'tagName': depth0},inverse:self.noop,fn:self.program(2, program2, data),contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "settings.users", options) : helperMissing.call(depth0, "link-to", "settings.users", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    ");
-  return buffer;
-  }
-function program2(depth0,data) {
-  
-  
-  data.buffer.push("<i class=\"icon-chevron-left\"></i>Users");
-  }
-
-function program4(depth0,data) {
-  
-  var buffer = '', stack1, helper, options;
-  data.buffer.push("\n            <span class=\"dropdown\">\n                ");
-  stack1 = (helper = helpers['gh-dropdown-button'] || (depth0 && depth0['gh-dropdown-button']),options={hash:{
-    'dropdownName': ("user-actions-menu"),
-    'classNames': ("btn btn-default only-has-icon user-actions-cog"),
-    'title': ("User Actions")
-  },hashTypes:{'dropdownName': "STRING",'classNames': "STRING",'title': "STRING"},hashContexts:{'dropdownName': depth0,'classNames': depth0,'title': depth0},inverse:self.noop,fn:self.program(5, program5, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-dropdown-button", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n                ");
-  stack1 = (helper = helpers['gh-dropdown'] || (depth0 && depth0['gh-dropdown']),options={hash:{
-    'name': ("user-actions-menu"),
-    'tagName': ("ul"),
-    'classNames': ("user-actions-menu dropdown-menu dropdown-triangle-top-right")
-  },hashTypes:{'name': "STRING",'tagName': "STRING",'classNames': "STRING"},hashContexts:{'name': depth0,'tagName': depth0,'classNames': depth0},inverse:self.noop,fn:self.program(7, program7, data),contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-dropdown", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n            </span>\n        ");
-  return buffer;
-  }
-function program5(depth0,data) {
-  
-  
-  data.buffer.push("\n                    <i class=\"icon-settings\"></i>\n                    <span class=\"hidden\">User Settings</span>\n                ");
-  }
-
-function program7(depth0,data) {
-  
-  var buffer = '', helper, options;
-  data.buffer.push("\n                    ");
-  data.buffer.push(escapeExpression((helper = helpers.partial || (depth0 && depth0.partial),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "user-actions-menu", options) : helperMissing.call(depth0, "partial", "user-actions-menu", options))));
-  data.buffer.push("\n                ");
-  return buffer;
-  }
-
-function program9(depth0,data) {
-  
-  var buffer = '', helper, options;
-  data.buffer.push("\n            <div class=\"form-group\">\n                <label for=\"user-role\">Role</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-role-selector'] || (depth0 && depth0['gh-role-selector']),options={hash:{
-    'initialValue': ("role"),
-    'onChange': ("changeRole"),
-    'selectId': ("user-role")
-  },hashTypes:{'initialValue': "ID",'onChange': "STRING",'selectId': "STRING"},hashContexts:{'initialValue': depth0,'onChange': depth0,'selectId': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-role-selector", options))));
-  data.buffer.push("\n                <p>What permissions should this user have?</p>\n            </div>\n            ");
-  return buffer;
-  }
-
-function program11(depth0,data) {
-  
-  var buffer = '', helper, options;
-  data.buffer.push("\n            <div class=\"form-group\">\n                <label for=\"user-password-old\">Old Password</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'value': ("user.password"),
-    'type': ("password"),
-    'id': ("user-password-old")
-  },hashTypes:{'value': "ID",'type': "STRING",'id': "STRING"},hashContexts:{'value': depth0,'type': depth0,'id': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n            </div>\n            ");
-  return buffer;
-  }
-
-  data.buffer.push("<header class=\"settings-subview-header\">\n    ");
-  stack1 = helpers.unless.call(depth0, "session.user.isAuthor", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n    <h2 class=\"page-title\">");
-  stack1 = helpers._triageMustache.call(depth0, "user.name", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</h2>\n    <section class=\"page-actions\">\n        ");
-  stack1 = helpers['if'].call(depth0, "view.userActionsAreVisible", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(4, program4, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n\n        <button class=\"btn btn-blue\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "save", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">Save</button>\n    </section>\n</header>\n\n<div class=\"content settings-user\">\n\n    <figure class=\"user-cover\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'style': ("cover")
-  },hashTypes:{'style': "ID"},hashContexts:{'style': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">\n        <button class=\"btn btn-default user-cover-edit js-modal-cover\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "openModal", "upload", "user", "cover", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0,depth0,depth0],types:["STRING","STRING","ID","STRING"],data:data})));
-  data.buffer.push(">Change Cover</button>\n    </figure>\n\n    <form class=\"user-profile\" novalidate=\"novalidate\" autocomplete=\"off\">\n\n        \n        <input style=\"display:none;\" type=\"text\" name=\"fakeusernameremembered\"/>\n        <input style=\"display:none;\" type=\"password\" name=\"fakepasswordremembered\"/>\n\n        <fieldset class=\"user-details-top\">\n\n            <figure class=\"user-image\">\n                <div id=\"user-image\" class=\"img\" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'style': ("image")
-  },hashTypes:{'style': "ID"},hashContexts:{'style': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(" href=\"#\"><span class=\"hidden\">");
-  stack1 = helpers._triageMustache.call(depth0, "name", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\"s Picture</span></div>\n                <button type=\"button\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "openModal", "upload", "user", "image", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0,depth0,depth0,depth0],types:["STRING","STRING","ID","STRING"],data:data})));
-  data.buffer.push(" class=\"edit-user-image js-modal-image\">Edit Picture</button>\n            </figure>\n\n            <div class=\"form-group first-form-group\">\n                <label for=\"user-name\">Full Name</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'value': ("user.name"),
-    'id': ("user-name"),
-    'class': ("user-name"),
-    'placeholder': ("Full Name"),
-    'autocorrect': ("off")
-  },hashTypes:{'value': "ID",'id': "STRING",'class': "STRING",'placeholder': "STRING",'autocorrect': "STRING"},hashContexts:{'value': depth0,'id': depth0,'class': depth0,'placeholder': depth0,'autocorrect': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n                <p>Use your real name so people can recognise you</p>\n            </div>\n\n        </fieldset>\n\n        <fieldset class=\"user-details-bottom\">\n\n            <div class=\"form-group\">\n                <label for=\"user-slug\">Slug</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-input'] || (depth0 && depth0['gh-input']),options={hash:{
-    'class': ("user-name"),
-    'id': ("user-slug"),
-    'value': ("slugValue"),
-    'name': ("user"),
-    'focus-out': ("updateSlug"),
-    'placeholder': ("Slug"),
-    'selectOnClick': ("true"),
-    'autocorrect': ("off")
-  },hashTypes:{'class': "STRING",'id': "STRING",'value': "ID",'name': "STRING",'focus-out': "STRING",'placeholder': "STRING",'selectOnClick': "STRING",'autocorrect': "STRING"},hashContexts:{'class': depth0,'id': depth0,'value': depth0,'name': depth0,'focus-out': depth0,'placeholder': depth0,'selectOnClick': depth0,'autocorrect': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-input", options))));
-  data.buffer.push("\n                <p>");
-  stack1 = helpers._triageMustache.call(depth0, "gh-blog-url", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("/author/");
-  stack1 = helpers._triageMustache.call(depth0, "slugValue", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("</p>\n            </div>\n\n            <div class=\"form-group\">\n                <label for=\"user-email\">Email</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'type': ("email"),
-    'value': ("user.email"),
-    'id': ("user-email"),
-    'placeholder': ("Email Address"),
-    'autocapitalize': ("off"),
-    'autocorrect': ("off"),
-    'autocomplete': ("off")
-  },hashTypes:{'type': "STRING",'value': "ID",'id': "STRING",'placeholder': "STRING",'autocapitalize': "STRING",'autocorrect': "STRING",'autocomplete': "STRING"},hashContexts:{'type': depth0,'value': depth0,'id': depth0,'placeholder': depth0,'autocapitalize': depth0,'autocorrect': depth0,'autocomplete': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n                <p>Used for notifications</p>\n            </div>\n            ");
-  stack1 = helpers['if'].call(depth0, "view.rolesDropdownIsVisible", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(9, program9, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n            <div class=\"form-group\">\n                <label for=\"user-location\">Location</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'type': ("text"),
-    'value': ("user.location"),
-    'id': ("user-location")
-  },hashTypes:{'type': "STRING",'value': "ID",'id': "STRING"},hashContexts:{'type': depth0,'value': depth0,'id': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n                <p>Where in the world do you live?</p>\n            </div>\n\n            <div class=\"form-group\">\n                <label for=\"user-website\">Website</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'type': ("url"),
-    'value': ("user.website"),
-    'id': ("user-website"),
-    'autocapitalize': ("off"),
-    'autocorrect': ("off"),
-    'autocomplete': ("off")
-  },hashTypes:{'type': "STRING",'value': "ID",'id': "STRING",'autocapitalize': "STRING",'autocorrect': "STRING",'autocomplete': "STRING"},hashContexts:{'type': depth0,'value': depth0,'id': depth0,'autocapitalize': depth0,'autocorrect': depth0,'autocomplete': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n                <p>Have a website or blog other than this one? Link it!</p>\n            </div>\n\n            <div class=\"form-group bio-container\">\n                <label for=\"user-bio\">Bio</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.textarea || (depth0 && depth0.textarea),options={hash:{
-    'id': ("user-bio"),
-    'value': ("user.bio")
-  },hashTypes:{'id': "STRING",'value': "ID"},hashContexts:{'id': depth0,'value': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "textarea", options))));
-  data.buffer.push("\n                <p>\n                    Write about you, in 200 characters or less.\n                    ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-count-characters'] || (depth0 && depth0['gh-count-characters']),options={hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["ID"],data:data},helper ? helper.call(depth0, "user.bio", options) : helperMissing.call(depth0, "gh-count-characters", "user.bio", options))));
-  data.buffer.push("\n                </p>\n            </div>\n\n            <hr />\n\n        </fieldset>\n\n        <fieldset>\n            ");
-  stack1 = helpers.unless.call(depth0, "view.isNotOwnProfile", {hash:{},hashTypes:{},hashContexts:{},inverse:self.noop,fn:self.program(11, program11, data),contexts:[depth0],types:["ID"],data:data});
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n\n            <div class=\"form-group\">\n                <label for=\"user-password-new\">New Password</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'value': ("user.newPassword"),
-    'type': ("password"),
-    'id': ("user-password-new")
-  },hashTypes:{'value': "ID",'type': "STRING",'id': "STRING"},hashContexts:{'value': depth0,'type': depth0,'id': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n            </div>\n\n            <div class=\"form-group\">\n                <label for=\"user-new-password-verification\">Verify Password</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'value': ("user.ne2Password"),
-    'type': ("password"),
-    'id': ("user-new-password-verification")
-  },hashTypes:{'value': "ID",'type': "STRING",'id': "STRING"},hashContexts:{'value': depth0,'type': depth0,'id': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n            </div>\n            <div class=\"form-group\">\n                <button type=\"button\" class=\"btn btn-red button-change-password\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "password", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">Change Password</button>\n            </div>\n\n        </fieldset>\n\n    </form>\n\n</div>");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/setup', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', helper, options, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression;
-
-
-  data.buffer.push("<section class=\"setup-box js-setup-box fade-in\">\n    <div class=\"vertical\">\n        <form id=\"setup\" class=\"setup-form\" method=\"post\" novalidate=\"novalidate\">\n\n            \n            <input style=\"display:none;\" type=\"text\" name=\"fakeusernameremembered\"/>\n            <input style=\"display:none;\" type=\"password\" name=\"fakepasswordremembered\"/>\n\n            <header>\n                <h1>Welcome to your new Ghost blog</h1>\n                <h2>Let's get a few things set up so you can get started.</h2>\n            </header>\n            <div class=\"form-group\">\n                <label for=\"blog-title\">Blog Title</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'type': ("text"),
-    'name': ("blog-title"),
-    'autofocus': ("autofocus"),
-    'autocorrect': ("off"),
-    'value': ("blogTitle")
-  },hashTypes:{'type': "STRING",'name': "STRING",'autofocus': "STRING",'autocorrect': "STRING",'value': "ID"},hashContexts:{'type': depth0,'name': depth0,'autofocus': depth0,'autocorrect': depth0,'value': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n                <p>What would you like to call your blog?</p>\n            </div>\n            <div class=\"form-group\">\n                <label for=\"name\">Full Name</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'type': ("text"),
-    'name': ("name"),
-    'autofocus': ("autofocus"),
-    'autocorrect': ("off"),
-    'value': ("name")
-  },hashTypes:{'type': "STRING",'name': "STRING",'autofocus': "STRING",'autocorrect': "STRING",'value': "ID"},hashContexts:{'type': depth0,'name': depth0,'autofocus': depth0,'autocorrect': depth0,'value': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n                <p>The name that you will sign your posts with</p>\n            </div>\n            <div class=\"form-group\">\n                <label for=\"email\">Email Address</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'type': ("email"),
-    'name': ("email"),
-    'autofocus': ("autofocus"),
-    'autocorrect': ("off"),
-    'value': ("email")
-  },hashTypes:{'type': "STRING",'name': "STRING",'autofocus': "STRING",'autocorrect': "STRING",'value': "ID"},hashContexts:{'type': depth0,'name': depth0,'autofocus': depth0,'autocorrect': depth0,'value': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n                <p>Used for important notifications</p>\n            </div>\n            <div class=\"form-group\">\n                <label for=\"password\">Password</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'type': ("password"),
-    'name': ("password"),
-    'autofocus': ("autofocus"),
-    'autocorrect': ("off"),
-    'value': ("password")
-  },hashTypes:{'type': "STRING",'name': "STRING",'autofocus': "STRING",'autocorrect': "STRING",'value': "ID"},hashContexts:{'type': depth0,'name': depth0,'autofocus': depth0,'autocorrect': depth0,'value': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n                <p>Must be at least 8 characters</p>\n            </div>\n            <footer>\n                <button type=\"submit\" class=\"btn btn-green btn-lg\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "setup", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'disabled': ("submitting")
-  },hashTypes:{'disabled': "ID"},hashContexts:{'disabled': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">Ok, Let's Do This</button>\n            </footer>\n        </form>\n    </div>\n</section>");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/signin', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', stack1, helper, options, escapeExpression=this.escapeExpression, helperMissing=helpers.helperMissing, self=this;
-
-function program1(depth0,data) {
-  
-  
-  data.buffer.push("Forgotten password?");
-  }
-
-  data.buffer.push("<section class=\"login-box js-login-box fade-in\">\n    <form id=\"login\" class=\"login-form\" method=\"post\" novalidate=\"novalidate\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "validateAndAuthenticate", {hash:{
-    'on': ("submit")
-  },hashTypes:{'on': "STRING"},hashContexts:{'on': depth0},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(">\n        <div class=\"email-wrap\">\n            <span class=\"input-icon icon-mail\">\n                ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-trim-focus-input'] || (depth0 && depth0['gh-trim-focus-input']),options={hash:{
-    'class': ("email"),
-    'type': ("email"),
-    'placeholder': ("Email Address"),
-    'name': ("identification"),
-    'autocapitalize': ("off"),
-    'autocorrect': ("off"),
-    'value': ("identification")
-  },hashTypes:{'class': "STRING",'type': "STRING",'placeholder': "STRING",'name': "STRING",'autocapitalize': "STRING",'autocorrect': "STRING",'value': "ID"},hashContexts:{'class': depth0,'type': depth0,'placeholder': depth0,'name': depth0,'autocapitalize': depth0,'autocorrect': depth0,'value': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-trim-focus-input", options))));
-  data.buffer.push("\n            </span>\n        </div>\n        <div class=\"password-wrap\">\n            <span class=\"input-icon icon-lock\">\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'class': ("password"),
-    'type': ("password"),
-    'placeholder': ("Password"),
-    'name': ("password"),
-    'value': ("password")
-  },hashTypes:{'class': "STRING",'type': "STRING",'placeholder': "STRING",'name': "STRING",'value': "ID"},hashContexts:{'class': depth0,'type': depth0,'placeholder': depth0,'name': depth0,'value': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n            </span>\n        </div>\n        <button class=\"btn btn-blue\" type=\"submit\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "validateAndAuthenticate", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'disabled': ("submitting")
-  },hashTypes:{'disabled': "ID"},hashContexts:{'disabled': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">Log in</button>\n        <section class=\"meta\">\n            ");
-  stack1 = (helper = helpers['link-to'] || (depth0 && depth0['link-to']),options={hash:{
-    'class': ("forgotten-password")
-  },hashTypes:{'class': "STRING"},hashContexts:{'class': depth0},inverse:self.noop,fn:self.program(1, program1, data),contexts:[depth0],types:["STRING"],data:data},helper ? helper.call(depth0, "forgotten", options) : helperMissing.call(depth0, "link-to", "forgotten", options));
-  if(stack1 || stack1 === 0) { data.buffer.push(stack1); }
-  data.buffer.push("\n        </section>\n    </form>\n</section>\n");
-  return buffer;
-  
-}); });
-
-define('ghost/templates/signup', ['exports'], function(__exports__){ __exports__['default'] = Ember.Handlebars.template(function anonymous(Handlebars,depth0,helpers,partials,data) {
-this.compilerInfo = [4,'>= 1.0.0'];
-helpers = this.merge(helpers, Ember.Handlebars.helpers); data = data || {};
-  var buffer = '', helper, options, helperMissing=helpers.helperMissing, escapeExpression=this.escapeExpression;
-
-
-  data.buffer.push("<section class=\"setup-box js-signup-box fade-in\">\n    <div class=\"vertical\">\n        <form id=\"signup\" class=\"setup-form\" method=\"post\" novalidate=\"novalidate\">\n\n            \n            <input style=\"display:none;\" type=\"text\" name=\"fakeusernameremembered\"/>\n            <input style=\"display:none;\" type=\"password\" name=\"fakepasswordremembered\"/>\n\n            <header>\n                <h1>Welcome to Ghost</h1>\n                <h2>Create your account to start publishing</h2>\n            </header>\n            <div class=\"form-group\">\n                <label for=\"email\">Email Address</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'type': ("email"),
-    'name': ("email"),
-    'autocorrect': ("off"),
-    'value': ("email")
-  },hashTypes:{'type': "STRING",'name': "STRING",'autocorrect': "STRING",'value': "ID"},hashContexts:{'type': depth0,'name': depth0,'autocorrect': depth0,'value': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n                <p>Used for important notifications</p>\n            </div>\n            <div class=\"form-group\">\n                <label for=\"name\">Full Name</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers['gh-trim-focus-input'] || (depth0 && depth0['gh-trim-focus-input']),options={hash:{
-    'type': ("text"),
-    'name': ("name"),
-    'autofocus': ("autofocus"),
-    'autocorrect': ("off"),
-    'value': ("name")
-  },hashTypes:{'type': "STRING",'name': "STRING",'autofocus': "STRING",'autocorrect': "STRING",'value': "ID"},hashContexts:{'type': depth0,'name': depth0,'autofocus': depth0,'autocorrect': depth0,'value': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "gh-trim-focus-input", options))));
-  data.buffer.push("\n                <p>The name that you will sign your posts with</p>\n            </div>\n            <div class=\"form-group\">\n                <label for=\"password\">Password</label>\n                ");
-  data.buffer.push(escapeExpression((helper = helpers.input || (depth0 && depth0.input),options={hash:{
-    'type': ("password"),
-    'name': ("password"),
-    'autofocus': ("autofocus"),
-    'autocorrect': ("off"),
-    'value': ("password")
-  },hashTypes:{'type': "STRING",'name': "STRING",'autofocus': "STRING",'autocorrect': "STRING",'value': "ID"},hashContexts:{'type': depth0,'name': depth0,'autofocus': depth0,'autocorrect': depth0,'value': depth0},contexts:[],types:[],data:data},helper ? helper.call(depth0, options) : helperMissing.call(depth0, "input", options))));
-  data.buffer.push("\n                <p>Must be at least 8 characters</p>\n            </div>\n            <footer>\n                <button type=\"submit\" class=\"btn btn-green btn-lg\" ");
-  data.buffer.push(escapeExpression(helpers.action.call(depth0, "signup", {hash:{},hashTypes:{},hashContexts:{},contexts:[depth0],types:["STRING"],data:data})));
-  data.buffer.push(" ");
-  data.buffer.push(escapeExpression(helpers['bind-attr'].call(depth0, {hash:{
-    'disabled': ("submitting")
-  },hashTypes:{'disabled': "ID"},hashContexts:{'disabled': depth0},contexts:[],types:[],data:data})));
-  data.buffer.push(">Create Account</button>\n            </footer>\n        </form>\n    </div>\n</section>\n");
-  return buffer;
-  
-}); });
+define('ghost/templates/-contributors', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/ErisDS");
+      dom.setAttribute(el2,"title","ErisDS");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","ErisDS");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/PaulAdamDavis");
+      dom.setAttribute(el2,"title","PaulAdamDavis");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","PaulAdamDavis");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/JohnONolan");
+      dom.setAttribute(el2,"title","JohnONolan");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","JohnONolan");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/halfdan");
+      dom.setAttribute(el2,"title","halfdan");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","halfdan");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/jaswilli");
+      dom.setAttribute(el2,"title","jaswilli");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","jaswilli");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/felixrieseberg");
+      dom.setAttribute(el2,"title","felixrieseberg");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","felixrieseberg");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/novaugust");
+      dom.setAttribute(el2,"title","novaugust");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","novaugust");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/sebgie");
+      dom.setAttribute(el2,"title","sebgie");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","sebgie");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/hswolff");
+      dom.setAttribute(el2,"title","hswolff");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","hswolff");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/rwjblue");
+      dom.setAttribute(el2,"title","rwjblue");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","rwjblue");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/javorszky");
+      dom.setAttribute(el2,"title","javorszky");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","javorszky");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/cobbspur");
+      dom.setAttribute(el2,"title","cobbspur");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","cobbspur");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/jillesme");
+      dom.setAttribute(el2,"title","jillesme");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","jillesme");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/morficus");
+      dom.setAttribute(el2,"title","morficus");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","morficus");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/SiR-DanieL");
+      dom.setAttribute(el2,"title","SiR-DanieL");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","SiR-DanieL");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/mattiascibien");
+      dom.setAttribute(el2,"title","mattiascibien");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","mattiascibien");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/wjake");
+      dom.setAttribute(el2,"title","wjake");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","wjake");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/shindakun");
+      dom.setAttribute(el2,"title","shindakun");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","shindakun");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/IanMitchell");
+      dom.setAttribute(el2,"title","IanMitchell");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","IanMitchell");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("li");
+      var el2 = dom.createTextNode("\n	");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"href","https://github.com/iBotPeaches");
+      dom.setAttribute(el2,"title","iBotPeaches");
+      var el3 = dom.createTextNode("\n		");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("img");
+      dom.setAttribute(el3,"alt","iBotPeaches");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n	");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, subexpr = hooks.subexpr, concat = hooks.concat, attribute = hooks.attribute;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element0 = dom.childAt(fragment, [0, 1, 1]);
+      var element1 = dom.childAt(fragment, [2, 1, 1]);
+      var element2 = dom.childAt(fragment, [4, 1, 1]);
+      var element3 = dom.childAt(fragment, [6, 1, 1]);
+      var element4 = dom.childAt(fragment, [8, 1, 1]);
+      var element5 = dom.childAt(fragment, [10, 1, 1]);
+      var element6 = dom.childAt(fragment, [12, 1, 1]);
+      var element7 = dom.childAt(fragment, [14, 1, 1]);
+      var element8 = dom.childAt(fragment, [16, 1, 1]);
+      var element9 = dom.childAt(fragment, [18, 1, 1]);
+      var element10 = dom.childAt(fragment, [20, 1, 1]);
+      var element11 = dom.childAt(fragment, [22, 1, 1]);
+      var element12 = dom.childAt(fragment, [24, 1, 1]);
+      var element13 = dom.childAt(fragment, [26, 1, 1]);
+      var element14 = dom.childAt(fragment, [28, 1, 1]);
+      var element15 = dom.childAt(fragment, [30, 1, 1]);
+      var element16 = dom.childAt(fragment, [32, 1, 1]);
+      var element17 = dom.childAt(fragment, [34, 1, 1]);
+      var element18 = dom.childAt(fragment, [36, 1, 1]);
+      var element19 = dom.childAt(fragment, [38, 1, 1]);
+      var attrMorph0 = dom.createAttrMorph(element0, 'src');
+      var attrMorph1 = dom.createAttrMorph(element1, 'src');
+      var attrMorph2 = dom.createAttrMorph(element2, 'src');
+      var attrMorph3 = dom.createAttrMorph(element3, 'src');
+      var attrMorph4 = dom.createAttrMorph(element4, 'src');
+      var attrMorph5 = dom.createAttrMorph(element5, 'src');
+      var attrMorph6 = dom.createAttrMorph(element6, 'src');
+      var attrMorph7 = dom.createAttrMorph(element7, 'src');
+      var attrMorph8 = dom.createAttrMorph(element8, 'src');
+      var attrMorph9 = dom.createAttrMorph(element9, 'src');
+      var attrMorph10 = dom.createAttrMorph(element10, 'src');
+      var attrMorph11 = dom.createAttrMorph(element11, 'src');
+      var attrMorph12 = dom.createAttrMorph(element12, 'src');
+      var attrMorph13 = dom.createAttrMorph(element13, 'src');
+      var attrMorph14 = dom.createAttrMorph(element14, 'src');
+      var attrMorph15 = dom.createAttrMorph(element15, 'src');
+      var attrMorph16 = dom.createAttrMorph(element16, 'src');
+      var attrMorph17 = dom.createAttrMorph(element17, 'src');
+      var attrMorph18 = dom.createAttrMorph(element18, 'src');
+      var attrMorph19 = dom.createAttrMorph(element19, 'src');
+      attribute(env, attrMorph0, element0, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/ErisDS"]));
+      attribute(env, attrMorph1, element1, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/PaulAdamDavis"]));
+      attribute(env, attrMorph2, element2, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/JohnONolan"]));
+      attribute(env, attrMorph3, element3, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/halfdan"]));
+      attribute(env, attrMorph4, element4, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/jaswilli"]));
+      attribute(env, attrMorph5, element5, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/felixrieseberg"]));
+      attribute(env, attrMorph6, element6, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/novaugust"]));
+      attribute(env, attrMorph7, element7, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/sebgie"]));
+      attribute(env, attrMorph8, element8, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/hswolff"]));
+      attribute(env, attrMorph9, element9, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/rwjblue"]));
+      attribute(env, attrMorph10, element10, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/javorszky"]));
+      attribute(env, attrMorph11, element11, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/cobbspur"]));
+      attribute(env, attrMorph12, element12, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/jillesme"]));
+      attribute(env, attrMorph13, element13, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/morficus"]));
+      attribute(env, attrMorph14, element14, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/SiR-DanieL"]));
+      attribute(env, attrMorph15, element15, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/mattiascibien"]));
+      attribute(env, attrMorph16, element16, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/wjake"]));
+      attribute(env, attrMorph17, element17, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/shindakun"]));
+      attribute(env, attrMorph18, element18, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/IanMitchell"]));
+      attribute(env, attrMorph19, element19, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/contributors"], {}), "/iBotPeaches"]));
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/-import-errors', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    var child0 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("    ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("tr");
+          var el2 = dom.createElement("td");
+          dom.appendChild(el1, el2);
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, content = hooks.content;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          var morph0 = dom.createMorphAt(dom.childAt(fragment, [1, 0]),-1,-1);
+          content(env, morph0, context, "error.message");
+          return fragment;
+        }
+      };
+    }());
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createElement("table");
+        dom.setAttribute(el1,"class","table");
+        var el2 = dom.createTextNode("\n");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, block = hooks.block;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(dom.childAt(fragment, [0]),0,-1);
+        block(env, morph0, context, "each", [get(env, context, "importErrors")], {"keyword": "error"}, child0, null);
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      block(env, morph0, context, "if", [get(env, context, "importErrors")], {}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/-navbar', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("        ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("div");
+        dom.setAttribute(el1,"class","nav-label");
+        var el2 = dom.createElement("i");
+        dom.setAttribute(el2,"class","icon-content");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode(" Content");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  var child1 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("        ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("div");
+        dom.setAttribute(el1,"class","nav-label");
+        var el2 = dom.createElement("i");
+        dom.setAttribute(el2,"class","icon-add");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode(" New Post");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  var child2 = (function() {
+    var child0 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("        ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("div");
+          dom.setAttribute(el1,"class","nav-label");
+          var el2 = dom.createElement("i");
+          dom.setAttribute(el2,"class","icon-settings2");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode(" Settings");
+          dom.appendChild(el1, el2);
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          return fragment;
+        }
+      };
+    }());
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, block = hooks.block;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        block(env, morph0, context, "link-to", ["settings"], {"classNames": "nav-item nav-settings js-nav-item"}, child0, null);
+        return fragment;
+      }
+    };
+  }());
+  var child3 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("            ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("span");
+        dom.setAttribute(el1,"class","image");
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("img");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n            ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("div");
+        dom.setAttribute(el1,"class","name");
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode(" ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("i");
+        dom.setAttribute(el2,"class","icon-chevron-down");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("small");
+        var el3 = dom.createTextNode("Profile & Settings");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, element = hooks.element, content = hooks.content;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element2 = dom.childAt(fragment, [1]);
+        var element3 = dom.childAt(element2, [1]);
+        var morph0 = dom.createMorphAt(dom.childAt(fragment, [3]),0,1);
+        element(env, element2, context, "bind-attr", [], {"style": get(env, context, "userImageBackground")});
+        element(env, element3, context, "bind-attr", [], {"src": "userImage", "title": "userImageAlt"});
+        content(env, morph0, context, "session.user.name");
+        return fragment;
+      }
+    };
+  }());
+  var child4 = (function() {
+    var child0 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createElement("i");
+          dom.setAttribute(el1,"class","icon-user");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode(" Your Profile");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          return fragment;
+        }
+      };
+    }());
+    var child1 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createElement("i");
+          dom.setAttribute(el1,"class","icon-power");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode(" Sign Out");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          return fragment;
+        }
+      };
+    }());
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("            ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("ul");
+        dom.setAttribute(el1,"class","dropdown-menu dropdown-triangle-top-right js-user-menu-dropdown-menu");
+        dom.setAttribute(el1,"role","menu");
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("li");
+        dom.setAttribute(el2,"role","presentation");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("li");
+        dom.setAttribute(el2,"class","divider");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("li");
+        dom.setAttribute(el2,"role","presentation");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, block = hooks.block;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element1 = dom.childAt(fragment, [1]);
+        var morph0 = dom.createMorphAt(dom.childAt(element1, [1]),-1,-1);
+        var morph1 = dom.createMorphAt(dom.childAt(element1, [5]),-1,-1);
+        block(env, morph0, context, "link-to", ["settings.users.user", get(env, context, "session.user.slug")], {"classNames": "dropdown-item user-menu-profile js-nav-item", "role": "menuitem", "tabindex": "-1"}, child0, null);
+        block(env, morph1, context, "link-to", ["signout"], {"classNames": "dropdown-item user-menu-signout", "role": "menuitem", "tabindex": "-1"}, child1, null);
+        return fragment;
+      }
+    };
+  }());
+  var child5 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("            ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("div");
+        dom.setAttribute(el1,"class","help-button");
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("i");
+        dom.setAttribute(el2,"class","icon-question");
+        var el3 = dom.createElement("span");
+        dom.setAttribute(el3,"class","hidden");
+        var el4 = dom.createTextNode("Help");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  var child6 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("            ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("ul");
+        dom.setAttribute(el1,"class","dropdown-menu dropdown-triangle-top");
+        dom.setAttribute(el1,"role","menu");
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("li");
+        dom.setAttribute(el2,"role","presentation");
+        var el3 = dom.createElement("a");
+        dom.setAttribute(el3,"class","dropdown-item help-menu-support");
+        dom.setAttribute(el3,"role","menuitem");
+        dom.setAttribute(el3,"tabindex","-1");
+        dom.setAttribute(el3,"href","http://support.ghost.org/");
+        dom.setAttribute(el3,"target","_blank");
+        var el4 = dom.createElement("i");
+        dom.setAttribute(el4,"class","icon-support");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode(" Support Center");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("li");
+        dom.setAttribute(el2,"role","presentation");
+        var el3 = dom.createElement("a");
+        dom.setAttribute(el3,"class","dropdown-item help-menu-tweet");
+        dom.setAttribute(el3,"role","menuitem");
+        dom.setAttribute(el3,"tabindex","-1");
+        dom.setAttribute(el3,"href","https://twitter.com/intent/tweet?text=%40TryGhost+Hi%21+Can+you+help+me+with+&related=TryGhost");
+        dom.setAttribute(el3,"target","_blank");
+        dom.setAttribute(el3,"onclick","window.open(this.href, 'twitter-share', 'width=550,height=235');return false;");
+        var el4 = dom.createElement("i");
+        dom.setAttribute(el4,"class","icon-twitter");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode(" Tweet @TryGhost!");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("li");
+        dom.setAttribute(el2,"class","divider");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("li");
+        dom.setAttribute(el2,"role","presentation");
+        var el3 = dom.createElement("a");
+        dom.setAttribute(el3,"class","dropdown-item help-menu-how-to");
+        dom.setAttribute(el3,"role","menuitem");
+        dom.setAttribute(el3,"tabindex","-1");
+        dom.setAttribute(el3,"href","http://support.ghost.org/how-to-use-ghost/");
+        dom.setAttribute(el3,"target","_blank");
+        var el4 = dom.createElement("i");
+        dom.setAttribute(el4,"class","icon-book");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode(" How to Use Ghost");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("li");
+        dom.setAttribute(el2,"role","presentation");
+        var el3 = dom.createElement("a");
+        dom.setAttribute(el3,"class","dropdown-item help-menu-markdown");
+        dom.setAttribute(el3,"role","menuitem");
+        dom.setAttribute(el3,"tabindex","-1");
+        dom.setAttribute(el3,"href","");
+        var el4 = dom.createElement("i");
+        dom.setAttribute(el4,"class","icon-markdown");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode(" Markdown Help");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("li");
+        dom.setAttribute(el2,"class","divider");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("li");
+        dom.setAttribute(el2,"role","presentation");
+        var el3 = dom.createElement("a");
+        dom.setAttribute(el3,"class","dropdown-item help-menu-wishlist");
+        dom.setAttribute(el3,"role","menuitem");
+        dom.setAttribute(el3,"tabindex","-1");
+        dom.setAttribute(el3,"href","http://ideas.ghost.org/");
+        dom.setAttribute(el3,"target","_blank");
+        var el4 = dom.createElement("i");
+        dom.setAttribute(el4,"class","icon-list");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode(" Wishlist");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, element = hooks.element;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element0 = dom.childAt(fragment, [1, 9, 0]);
+        element(env, element0, context, "action", ["openModal", "markdown"], {});
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("nav");
+      dom.setAttribute(el1,"class","global-nav");
+      dom.setAttribute(el1,"role","navigation");
+      var el2 = dom.createTextNode("\n\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("a");
+      dom.setAttribute(el2,"class","nav-item ghost-logo");
+      dom.setAttribute(el2,"title","Visit blog");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("div");
+      dom.setAttribute(el3,"class","nav-label");
+      var el4 = dom.createElement("i");
+      dom.setAttribute(el4,"class","icon-ghost");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode(" ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("span");
+      var el5 = dom.createTextNode("Visit blog");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode(" ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n\n");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("div");
+      dom.setAttribute(el2,"class","nav-item user-menu");
+      var el3 = dom.createTextNode("\n");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("div");
+      dom.setAttribute(el2,"class","nav-item help-menu");
+      var el3 = dom.createTextNode("\n");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("div");
+      dom.setAttribute(el1,"class","nav-cover js-nav-cover");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, subexpr = hooks.subexpr, concat = hooks.concat, attribute = hooks.attribute, block = hooks.block, get = hooks.get;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element4 = dom.childAt(fragment, [0]);
+      var element5 = dom.childAt(element4, [1]);
+      var element6 = dom.childAt(element4, [6]);
+      if (this.cachedFragment) { dom.repairClonedNode(element6,[1]); }
+      var element7 = dom.childAt(element4, [8]);
+      if (this.cachedFragment) { dom.repairClonedNode(element7,[1]); }
+      var attrMorph0 = dom.createAttrMorph(element5, 'href');
+      var morph0 = dom.createMorphAt(element4,2,3);
+      var morph1 = dom.createMorphAt(element4,3,4);
+      var morph2 = dom.createMorphAt(element4,4,5);
+      var morph3 = dom.createMorphAt(element6,0,1);
+      var morph4 = dom.createMorphAt(element6,1,2);
+      var morph5 = dom.createMorphAt(element7,0,1);
+      var morph6 = dom.createMorphAt(element7,1,2);
+      attribute(env, attrMorph0, element5, "href", concat(env, [subexpr(env, context, "gh-path", ["blog"], {})]));
+      block(env, morph0, context, "link-to", ["posts"], {"classNames": "nav-item nav-content js-nav-item"}, child0, null);
+      block(env, morph1, context, "link-to", ["editor.new"], {"classNames": "nav-item nav-new js-nav-item"}, child1, null);
+      block(env, morph2, context, "unless", [get(env, context, "session.user.isAuthor")], {}, child2, null);
+      block(env, morph3, context, "gh-dropdown-button", [], {"dropdownName": "user-menu", "tagName": "div", "classNames": "nav-label clearfix"}, child3, null);
+      block(env, morph4, context, "gh-dropdown", [], {"tagName": "div", "classNames": "dropdown", "name": "user-menu", "closeOnClick": "true"}, child4, null);
+      block(env, morph5, context, "gh-dropdown-button", [], {"dropdownName": "help-menu", "tagName": "div", "classNames": "nav-label clearfix"}, child5, null);
+      block(env, morph6, context, "gh-dropdown", [], {"tagName": "div", "classNames": "dropdown", "name": "help-menu", "closeOnClick": "true"}, child6, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/-publish-bar', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("footer");
+      dom.setAttribute(el1,"id","publish-bar");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("div");
+      dom.setAttribute(el2,"class","publish-bar-inner");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("div");
+      dom.setAttribute(el3,"class","publish-bar-actions");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("button");
+      dom.setAttribute(el4,"type","button");
+      dom.setAttribute(el4,"class","post-settings");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, inline = hooks.inline, element = hooks.element;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element0 = dom.childAt(fragment, [0, 1]);
+      var element1 = dom.childAt(element0, [2]);
+      var element2 = dom.childAt(element1, [1]);
+      var morph0 = dom.createMorphAt(element0,0,1);
+      var morph1 = dom.createMorphAt(element1,2,3);
+      inline(env, morph0, context, "render", ["post-tags-input"], {});
+      element(env, element2, context, "action", ["toggleSettingsMenu"], {});
+      inline(env, morph1, context, "view", ["editor-save-button"], {"id": "entry-actions", "classNameBindings": "model.isNew:unsaved"});
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/-user-actions-menu', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createElement("li");
+        var el2 = dom.createElement("button");
+        var el3 = dom.createTextNode("Make Owner");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, element = hooks.element;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element1 = dom.childAt(fragment, [0, 0]);
+        element(env, element1, context, "action", ["openModal", "transfer-owner", get(env, context, "this")], {});
+        return fragment;
+      }
+    };
+  }());
+  var child1 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createElement("li");
+        var el2 = dom.createElement("button");
+        dom.setAttribute(el2,"class","delete");
+        var el3 = dom.createTextNode("Delete User");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, element = hooks.element;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element0 = dom.childAt(fragment, [0, 0]);
+        element(env, element0, context, "action", ["openModal", "delete-user", get(env, context, "this")], {});
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1,2]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      var morph1 = dom.createMorphAt(fragment,1,2,contextualElement);
+      block(env, morph0, context, "if", [get(env, context, "view.canMakeOwner")], {}, child0, null);
+      block(env, morph1, context, "if", [get(env, context, "view.deleteUserActionIsVisible")], {}, child1, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/application', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, inline = hooks.inline;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        inline(env, morph0, context, "partial", ["navbar"], {});
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("a");
+      dom.setAttribute(el1,"class","sr-only sr-only-focusable");
+      dom.setAttribute(el1,"href","#gh-main");
+      var el2 = dom.createTextNode("Skip to main content");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("main");
+      dom.setAttribute(el1,"id","gh-main");
+      dom.setAttribute(el1,"class","viewport");
+      dom.setAttribute(el1,"role","main");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block, element = hooks.element, inline = hooks.inline, content = hooks.content;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element0 = dom.childAt(fragment, [3]);
+      var morph0 = dom.createMorphAt(fragment,1,2,contextualElement);
+      var morph1 = dom.createMorphAt(element0,0,1);
+      var morph2 = dom.createMorphAt(element0,1,2);
+      var morph3 = dom.createMorphAt(fragment,4,5,contextualElement);
+      var morph4 = dom.createMorphAt(fragment,5,6,contextualElement);
+      var morph5 = dom.createMorphAt(fragment,6,7,contextualElement);
+      block(env, morph0, context, "unless", [get(env, context, "hideNav")], {}, child0, null);
+      element(env, element0, context, "bind-attr", [], {"data-notification-count": get(env, context, "topNotificationCount")});
+      inline(env, morph1, context, "gh-notifications", [], {"location": "top", "notify": "topNotificationChange"});
+      content(env, morph2, context, "outlet");
+      inline(env, morph3, context, "gh-notifications", [], {"location": "bottom"});
+      inline(env, morph4, context, "outlet", ["modal"], {});
+      inline(env, morph5, context, "outlet", ["settings-menu"], {});
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/components/gh-activating-list-item', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, content = hooks.content;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1,2]); }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        var morph1 = dom.createMorphAt(fragment,1,2,contextualElement);
+        content(env, morph0, context, "title");
+        content(env, morph1, context, "yield");
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      block(env, morph0, context, "link-to", [get(env, context, "route")], {"alternateActive": get(env, context, "active")}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/components/gh-file-upload', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("    ");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("input");
+      dom.setAttribute(el1,"data-url","upload");
+      dom.setAttribute(el1,"class","btn btn-green");
+      dom.setAttribute(el1,"type","file");
+      dom.setAttribute(el1,"name","importfile");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n    ");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("button");
+      dom.setAttribute(el1,"type","submit");
+      dom.setAttribute(el1,"class","btn btn-blue");
+      dom.setAttribute(el1,"id","startupload");
+      var el2 = dom.createTextNode("\n        ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, element = hooks.element, content = hooks.content;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element0 = dom.childAt(fragment, [1]);
+      var element1 = dom.childAt(fragment, [3]);
+      var morph0 = dom.createMorphAt(element1,0,1);
+      element(env, element0, context, "bind-attr", [], {"accept": get(env, context, "options.acceptEncoding")});
+      element(env, element1, context, "bind-attr", [], {"disabled": get(env, context, "uploadButtonDisabled")});
+      element(env, element1, context, "action", ["upload"], {});
+      content(env, morph0, context, "uploadButtonText");
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/components/gh-markdown', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, inline = hooks.inline;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      inline(env, morph0, context, "gh-format-markdown", [get(env, context, "markdown")], {});
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/components/gh-modal-dialog', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createElement("header");
+        dom.setAttribute(el0,"class","modal-header");
+        var el1 = dom.createElement("h1");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, content = hooks.content;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(dom.childAt(fragment, [0]),-1,-1);
+        content(env, morph0, context, "title");
+        return fragment;
+      }
+    };
+  }());
+  var child1 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createElement("a");
+        dom.setAttribute(el0,"class","close");
+        dom.setAttribute(el0,"href","");
+        dom.setAttribute(el0,"title","Close");
+        var el1 = dom.createElement("span");
+        dom.setAttribute(el1,"class","hidden");
+        var el2 = dom.createTextNode("Close");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, element = hooks.element;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element3 = fragment;
+        element(env, element3, context, "action", ["closeModal"], {});
+        return fragment;
+      }
+    };
+  }());
+  var child2 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("            ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("footer");
+        dom.setAttribute(el1,"class","modal-footer");
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("button");
+        dom.setAttribute(el2,"type","button");
+        var el3 = dom.createTextNode("\n                    ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createComment("\n                Required to strip the white-space between buttons\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("button");
+        dom.setAttribute(el2,"type","button");
+        var el3 = dom.createTextNode("\n                    ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, element = hooks.element, content = hooks.content;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element0 = dom.childAt(fragment, [1]);
+        var element1 = dom.childAt(element0, [1]);
+        var element2 = dom.childAt(element0, [3]);
+        var morph0 = dom.createMorphAt(element1,0,1);
+        var morph1 = dom.createMorphAt(element2,0,1);
+        element(env, element1, context, "bind-attr", [], {"class": "rejectButtonClass :js-button-reject"});
+        element(env, element1, context, "action", ["confirm", "reject"], {});
+        content(env, morph0, context, "confirm.reject.text");
+        element(env, element2, context, "bind-attr", [], {"class": "acceptButtonClass :js-button-accept"});
+        element(env, element2, context, "action", ["confirm", "accept"], {});
+        content(env, morph1, context, "confirm.accept.text");
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("div");
+      dom.setAttribute(el1,"class","modal-container js-modal-container");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("article");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("section");
+      dom.setAttribute(el3,"class","modal-content");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("section");
+      dom.setAttribute(el4,"class","modal-body");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("div");
+      dom.setAttribute(el1,"class","modal-background js-modal-background");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, element = hooks.element, get = hooks.get, block = hooks.block, content = hooks.content;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element4 = dom.childAt(fragment, [0]);
+      var element5 = dom.childAt(element4, [1]);
+      var element6 = dom.childAt(element5, [1]);
+      var morph0 = dom.createMorphAt(element6,0,1);
+      var morph1 = dom.createMorphAt(element6,1,2);
+      var morph2 = dom.createMorphAt(dom.childAt(element6, [3]),0,1);
+      var morph3 = dom.createMorphAt(element6,4,5);
+      element(env, element4, context, "action", ["closeModal"], {});
+      element(env, element5, context, "bind-attr", [], {"class": "klass :js-modal"});
+      element(env, element6, context, "action", ["noBubble"], {"bubbles": false, "preventDefault": false});
+      block(env, morph0, context, "if", [get(env, context, "title")], {}, child0, null);
+      block(env, morph1, context, "if", [get(env, context, "showClose")], {}, child1, null);
+      content(env, morph2, context, "yield");
+      block(env, morph3, context, "if", [get(env, context, "confirm")], {}, child2, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/components/gh-navitem', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("span");
+        dom.setAttribute(el1,"class","navigation-item-drag-handle icon-grab");
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("span");
+        dom.setAttribute(el2,"class","hidden");
+        var el3 = dom.createTextNode("Reorder");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n    ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  var child1 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("        ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("button");
+        dom.setAttribute(el1,"type","button");
+        dom.setAttribute(el1,"class","add-navigation-link icon-add");
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("span");
+        dom.setAttribute(el2,"class","hidden");
+        var el3 = dom.createTextNode("Add");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, element = hooks.element;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element1 = dom.childAt(fragment, [1]);
+        element(env, element1, context, "action", ["addItem"], {});
+        return fragment;
+      }
+    };
+  }());
+  var child2 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("        ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("button");
+        dom.setAttribute(el1,"type","button");
+        dom.setAttribute(el1,"class","navigation-delete icon-trash");
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("span");
+        dom.setAttribute(el2,"class","hidden");
+        var el3 = dom.createTextNode("Delete");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, element = hooks.element;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element0 = dom.childAt(fragment, [1]);
+        element(env, element0, context, "action", ["deleteItem", get(env, context, "navItem")], {});
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("div");
+      dom.setAttribute(el1,"class","navigation-inputs");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("span");
+      dom.setAttribute(el2,"class","navigation-item-label");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("span");
+      dom.setAttribute(el2,"class","navigation-item-url");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("span");
+      dom.setAttribute(el1,"class","navigation-item-action");
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block, inline = hooks.inline;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0]); }
+      var element2 = dom.childAt(fragment, [1]);
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      var morph1 = dom.createMorphAt(dom.childAt(element2, [1]),0,1);
+      var morph2 = dom.createMorphAt(dom.childAt(element2, [3]),0,1);
+      var morph3 = dom.createMorphAt(dom.childAt(fragment, [3]),0,-1);
+      block(env, morph0, context, "unless", [get(env, context, "navItem.last")], {}, child0, null);
+      inline(env, morph1, context, "gh-trim-focus-input", [], {"focus": get(env, context, "navItem.last"), "placeholder": "Label", "value": get(env, context, "navItem.label")});
+      inline(env, morph2, context, "gh-navitem-url-input", [], {"baseUrl": get(env, context, "baseUrl"), "url": get(env, context, "navItem.url"), "last": get(env, context, "navItem.last"), "change": "updateUrl"});
+      block(env, morph3, context, "if", [get(env, context, "navItem.last")], {}, child1, child2);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/components/gh-notification', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createElement("section");
+      var el1 = dom.createTextNode("\n    ");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("span");
+      dom.setAttribute(el1,"class","notification-message");
+      var el2 = dom.createTextNode("\n        ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n    ");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("button");
+      dom.setAttribute(el1,"class","close");
+      var el2 = dom.createElement("span");
+      dom.setAttribute(el2,"class","hidden");
+      var el3 = dom.createTextNode("Close");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, element = hooks.element, content = hooks.content;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element0 = fragment;
+      var element1 = dom.childAt(element0, [3]);
+      var morph0 = dom.createMorphAt(dom.childAt(element0, [1]),0,1);
+      element(env, element0, context, "bind-attr", [], {"class": ":js-notification typeClass"});
+      content(env, morph0, context, "message.message");
+      element(env, element1, context, "action", ["closeNotification"], {});
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/components/gh-notifications', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, inline = hooks.inline;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        inline(env, morph0, context, "gh-notification", [], {"message": get(env, context, "message")});
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      block(env, morph0, context, "each", [get(env, context, "messages")], {"keyword": "message"}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/components/gh-role-selector', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createElement("option");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, element = hooks.element, content = hooks.content;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element0 = dom.childAt(fragment, [0]);
+        var morph0 = dom.createMorphAt(element0,-1,-1);
+        element(env, element0, context, "bind-attr", [], {"value": get(env, context, "role.id")});
+        content(env, morph0, context, "role.name");
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("select");
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, element = hooks.element, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element1 = dom.childAt(fragment, [0]);
+      var morph0 = dom.createMorphAt(element1,0,-1);
+      element(env, element1, context, "bind-attr", [], {"id": get(env, context, "selectId"), "name": get(env, context, "selectName")});
+      block(env, morph0, context, "each", [get(env, context, "roles")], {"keyword": "role"}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/components/gh-uploader', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("span");
+      dom.setAttribute(el1,"class","media");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("span");
+      dom.setAttribute(el2,"class","hidden");
+      var el3 = dom.createTextNode("Image Upload");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("img");
+      dom.setAttribute(el1,"class","js-upload-target");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("div");
+      dom.setAttribute(el1,"class","description");
+      var el2 = dom.createElement("strong");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("input");
+      dom.setAttribute(el1,"data-url","upload");
+      dom.setAttribute(el1,"class","js-fileupload main fileupload");
+      dom.setAttribute(el1,"type","file");
+      dom.setAttribute(el1,"name","uploadimage");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, element = hooks.element, content = hooks.content;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element0 = dom.childAt(fragment, [2]);
+      var morph0 = dom.createMorphAt(dom.childAt(fragment, [4]),-1,0);
+      element(env, element0, context, "bind-attr", [], {"src": get(env, context, "imageSource")});
+      content(env, morph0, context, "description");
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/components/gh-url-preview', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, content = hooks.content;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      content(env, morph0, context, "url");
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/editor-save-button', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("i");
+        dom.setAttribute(el1,"class","options");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("span");
+        dom.setAttribute(el1,"class","sr-only");
+        var el2 = dom.createTextNode("Toggle Settings Menu");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  var child1 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("ul");
+        dom.setAttribute(el1,"class","dropdown-menu dropdown-triangle-bottom-right");
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("li");
+        var el3 = dom.createTextNode("\n            ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("a");
+        dom.setAttribute(el3,"href","#");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n        ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("li");
+        var el3 = dom.createTextNode("\n            ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("a");
+        dom.setAttribute(el3,"href","#");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n        ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("li");
+        dom.setAttribute(el2,"class","divider delete");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("li");
+        dom.setAttribute(el2,"class","delete");
+        var el3 = dom.createTextNode("\n            ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("a");
+        dom.setAttribute(el3,"href","#");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n        ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n    ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, element = hooks.element, content = hooks.content, get = hooks.get;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element0 = dom.childAt(fragment, [1]);
+        var element1 = dom.childAt(element0, [1]);
+        var element2 = dom.childAt(element1, [1]);
+        var element3 = dom.childAt(element0, [3]);
+        var element4 = dom.childAt(element3, [1]);
+        var element5 = dom.childAt(element0, [7, 1]);
+        var morph0 = dom.createMorphAt(element2,-1,-1);
+        var morph1 = dom.createMorphAt(element4,-1,-1);
+        var morph2 = dom.createMorphAt(element5,-1,-1);
+        element(env, element1, context, "bind-attr", [], {"class": ":post-save-publish willPublish:active"});
+        element(env, element2, context, "action", ["setSaveType", "publish"], {});
+        content(env, morph0, context, "view.publishText");
+        element(env, element3, context, "bind-attr", [], {"class": ":post-save-draft willPublish::active"});
+        element(env, element4, context, "action", ["setSaveType", "draft"], {});
+        content(env, morph1, context, "view.draftText");
+        element(env, element5, context, "action", ["openModal", "delete-post", get(env, context, "this")], {});
+        content(env, morph2, context, "view.deleteText");
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("button");
+      dom.setAttribute(el1,"type","button");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, element = hooks.element, content = hooks.content, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[2,3]); }
+      var element6 = dom.childAt(fragment, [0]);
+      var morph0 = dom.createMorphAt(element6,-1,-1);
+      var morph1 = dom.createMorphAt(fragment,1,2,contextualElement);
+      var morph2 = dom.createMorphAt(fragment,2,3,contextualElement);
+      element(env, element6, context, "action", ["save"], {});
+      element(env, element6, context, "bind-attr", [], {"class": ":btn :btn-sm view.isDangerous:btn-red:btn-blue :js-publish-button"});
+      content(env, morph0, context, "view.saveText");
+      block(env, morph1, context, "gh-dropdown-button", [], {"dropdownName": "post-save-menu", "classNameBindings": ":btn :btn-sm view.isDangerous:btn-red:btn-blue btnopen:active :dropdown-toggle :up"}, child0, null);
+      block(env, morph2, context, "gh-dropdown", [], {"name": "post-save-menu", "closeOnClick": "true", "tagName": "div", "classNames": "dropdown editor-options"}, child1, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/editor/edit', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("header");
+      dom.setAttribute(el1,"class","page-header");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("button");
+      dom.setAttribute(el2,"class","menu-button js-menu-button");
+      var el3 = dom.createElement("span");
+      dom.setAttribute(el3,"class","sr-only");
+      var el4 = dom.createTextNode("Menu");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("h2");
+      dom.setAttribute(el2,"class","page-title");
+      var el3 = dom.createTextNode("Editor");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("div");
+      dom.setAttribute(el1,"class","page-content");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("header");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("section");
+      dom.setAttribute(el3,"class","box entry-title");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("section");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("header");
+      dom.setAttribute(el3,"class","floatingheader");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("small");
+      var el5 = dom.createTextNode("Markdown");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("a");
+      dom.setAttribute(el4,"class","markdown-help");
+      dom.setAttribute(el4,"href","");
+      var el5 = dom.createElement("span");
+      dom.setAttribute(el5,"class","hidden");
+      var el6 = dom.createTextNode("What is Markdown?");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("section");
+      dom.setAttribute(el3,"id","entry-markdown-content");
+      dom.setAttribute(el3,"class","entry-markdown-content");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("section");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("header");
+      dom.setAttribute(el3,"class","floatingheader");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("small");
+      var el5 = dom.createTextNode("Preview ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("span");
+      dom.setAttribute(el5,"class","entry-word-count js-entry-word-count");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("section");
+      dom.setAttribute(el3,"class","entry-preview-content js-entry-preview-content");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, element = hooks.element, get = hooks.get, inline = hooks.inline;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element0 = dom.childAt(fragment, [0, 1]);
+      var element1 = dom.childAt(fragment, [2]);
+      var element2 = dom.childAt(element1, [3]);
+      var element3 = dom.childAt(element2, [1]);
+      var element4 = dom.childAt(element3, [3]);
+      var element5 = dom.childAt(element1, [5]);
+      var element6 = dom.childAt(element5, [1]);
+      var morph0 = dom.createMorphAt(dom.childAt(element1, [1, 1]),0,1);
+      var morph1 = dom.createMorphAt(dom.childAt(element2, [3]),0,1);
+      var morph2 = dom.createMorphAt(dom.childAt(element6, [1, 1]),-1,-1);
+      var morph3 = dom.createMorphAt(dom.childAt(element5, [3]),0,1);
+      var morph4 = dom.createMorphAt(element1,6,7);
+      element(env, element0, context, "action", ["toggleGlobalMobileNav"], {});
+      inline(env, morph0, context, "gh-trim-focus-input", [], {"type": "text", "id": "entry-title", "placeholder": "Your Post Title", "value": get(env, context, "model.titleScratch"), "tabindex": "1", "focus": get(env, context, "shouldFocusTitle")});
+      element(env, element2, context, "bind-attr", [], {"class": ":entry-markdown :js-entry-markdown isPreview::active"});
+      element(env, element3, context, "action", ["togglePreview", false], {});
+      element(env, element4, context, "action", ["openModal", "markdown"], {});
+      inline(env, morph1, context, "gh-codemirror", [], {"value": get(env, context, "model.scratch"), "scrollInfo": get(env, context, "view.markdownScrollInfo"), "setCodeMirror": "setCodeMirror", "openModal": "openModal", "typingPause": "autoSave", "focus": get(env, context, "shouldFocusEditor"), "focusCursorAtEnd": get(env, context, "model.isDirty"), "onFocusIn": "autoSaveNew"});
+      element(env, element5, context, "bind-attr", [], {"class": ":entry-preview :js-entry-preview isPreview:active"});
+      element(env, element6, context, "action", ["togglePreview", true], {});
+      inline(env, morph2, context, "gh-count-words", [get(env, context, "model.scratch")], {});
+      inline(env, morph3, context, "gh-markdown", [], {"classNames": "rendered-markdown js-rendered-markdown", "markdown": get(env, context, "model.scratch"), "scrollPosition": get(env, context, "view.scrollPosition"), "uploadStarted": "disableCodeMirror", "uploadFinished": "enableCodeMirror", "uploadSuccess": "handleImgUpload"});
+      inline(env, morph4, context, "partial", ["publish-bar"], {});
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/error', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    var child0 = (function() {
+      var child0 = (function() {
+        return {
+          isHTMLBars: true,
+          blockParams: 0,
+          cachedFragment: null,
+          hasRendered: false,
+          build: function build(dom) {
+            var el0 = dom.createElement("em");
+            dom.setAttribute(el0,"class","error-stack-function");
+            return el0;
+          },
+          render: function render(context, env, contextualElement) {
+            var dom = env.dom;
+            var hooks = env.hooks, content = hooks.content;
+            dom.detectNamespace(contextualElement);
+            var fragment;
+            if (env.useFragmentCache && dom.canClone) {
+              if (this.cachedFragment === null) {
+                fragment = this.build(dom);
+                if (this.hasRendered) {
+                  this.cachedFragment = fragment;
+                } else {
+                  this.hasRendered = true;
+                }
+              }
+              if (this.cachedFragment) {
+                fragment = dom.cloneNode(this.cachedFragment, true);
+              }
+            } else {
+              fragment = this.build(dom);
+            }
+            var morph0 = dom.createMorphAt(fragment,-1,-1);
+            content(env, morph0, context, "item.function");
+            return fragment;
+          }
+        };
+      }());
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("                ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("li");
+          var el2 = dom.createTextNode("\n                    at\n                    ");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode("\n                    ");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createElement("span");
+          dom.setAttribute(el2,"class","error-stack-file");
+          var el3 = dom.createTextNode("(");
+          dom.appendChild(el2, el3);
+          var el3 = dom.createTextNode(")");
+          dom.appendChild(el2, el3);
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode("\n                ");
+          dom.appendChild(el1, el2);
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, get = hooks.get, block = hooks.block, content = hooks.content;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          var element0 = dom.childAt(fragment, [1]);
+          var morph0 = dom.createMorphAt(element0,0,1);
+          var morph1 = dom.createMorphAt(dom.childAt(element0, [2]),0,1);
+          block(env, morph0, context, "if", [get(env, context, "item.function")], {}, child0, null);
+          content(env, morph1, context, "item.at");
+          return fragment;
+        }
+      };
+    }());
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("section");
+        dom.setAttribute(el1,"class","error-stack");
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("h3");
+        var el3 = dom.createTextNode("Stack Trace");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("p");
+        var el3 = dom.createElement("strong");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("ul");
+        dom.setAttribute(el2,"class","error-stack-list");
+        var el3 = dom.createTextNode("\n");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("        ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n    ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, content = hooks.content, get = hooks.get, block = hooks.block;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element1 = dom.childAt(fragment, [1]);
+        var morph0 = dom.createMorphAt(dom.childAt(element1, [3, 0]),-1,-1);
+        var morph1 = dom.createMorphAt(dom.childAt(element1, [5]),0,1);
+        content(env, morph0, context, "message");
+        block(env, morph1, context, "each", [get(env, context, "stack")], {"keyword": "item"}, child0, null);
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("section");
+      dom.setAttribute(el1,"class","error-content error-404 js-error-container");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("section");
+      dom.setAttribute(el2,"class","error-details");
+      var el3 = dom.createTextNode("\n         ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("figure");
+      dom.setAttribute(el3,"class","error-image");
+      var el4 = dom.createTextNode("\n             ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("img");
+      dom.setAttribute(el4,"class","error-ghost");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n         ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n         ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("section");
+      dom.setAttribute(el3,"class","error-message");
+      var el4 = dom.createTextNode("\n             ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("h1");
+      dom.setAttribute(el4,"class","error-code");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n             ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("h2");
+      dom.setAttribute(el4,"class","error-description");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n             ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("a");
+      dom.setAttribute(el4,"class","error-link");
+      var el5 = dom.createTextNode("Go to the front page →");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n         ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, subexpr = hooks.subexpr, concat = hooks.concat, attribute = hooks.attribute, content = hooks.content, get = hooks.get, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[2]); }
+      var element2 = dom.childAt(fragment, [0, 1]);
+      var element3 = dom.childAt(element2, [1, 1]);
+      var element4 = dom.childAt(element2, [3]);
+      var element5 = dom.childAt(element4, [5]);
+      var attrMorph0 = dom.createAttrMorph(element3, 'src');
+      var attrMorph1 = dom.createAttrMorph(element3, 'srcset');
+      var morph0 = dom.createMorphAt(dom.childAt(element4, [1]),-1,-1);
+      var morph1 = dom.createMorphAt(dom.childAt(element4, [3]),-1,-1);
+      var attrMorph2 = dom.createAttrMorph(element5, 'href');
+      var morph2 = dom.createMorphAt(fragment,1,2,contextualElement);
+      attribute(env, attrMorph0, element3, "src", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/404-ghost@2x.png"], {})]));
+      attribute(env, attrMorph1, element3, "srcset", concat(env, [subexpr(env, context, "gh-path", ["admin", "/img/404-ghost.png"], {}), " 1x, ", subexpr(env, context, "gh-path", ["admin", "/img/404-ghost@2x.png"], {}), " 2x"]));
+      content(env, morph0, context, "code");
+      content(env, morph1, context, "message");
+      attribute(env, attrMorph2, element5, "href", concat(env, [subexpr(env, context, "gh-path", ["blog"], {})]));
+      block(env, morph2, context, "if", [get(env, context, "stack")], {}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/forgotten', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("section");
+      dom.setAttribute(el1,"class","forgotten-box js-forgotten-box fade-in");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("form");
+      dom.setAttribute(el2,"id","forgotten");
+      dom.setAttribute(el2,"class","forgotten-form");
+      dom.setAttribute(el2,"method","post");
+      dom.setAttribute(el2,"novalidate","novalidate");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("div");
+      dom.setAttribute(el3,"class","email-wrap");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("button");
+      dom.setAttribute(el3,"class","btn btn-blue");
+      dom.setAttribute(el3,"type","submit");
+      var el4 = dom.createTextNode("Send new password");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, inline = hooks.inline, element = hooks.element;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element0 = dom.childAt(fragment, [0, 1]);
+      var element1 = dom.childAt(element0, [3]);
+      var morph0 = dom.createMorphAt(dom.childAt(element0, [1]),0,1);
+      inline(env, morph0, context, "gh-trim-focus-input", [], {"value": get(env, context, "email"), "class": "email", "type": "email", "placeholder": "Email Address", "name": "email", "autofocus": "autofocus", "autocapitalize": "off", "autocorrect": "off"});
+      element(env, element1, context, "action", ["submit"], {});
+      element(env, element1, context, "bind-attr", [], {"disabled": get(env, context, "submitting")});
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/modals/copy-html', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("\n    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, inline = hooks.inline;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        inline(env, morph0, context, "textarea", [], {"value": get(env, context, "generatedHTML"), "rows": "6"});
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      block(env, morph0, context, "gh-modal-dialog", [], {"action": "closeModal", "showClose": true, "type": "action", "title": "Generated HTML", "confirm": get(env, context, "confirm"), "class": "copy-html"}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/modals/delete-all', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("\n    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("p");
+        var el2 = dom.createTextNode("This is permanent! No backups, no restores, no magic undo button. ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("br");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode(" We warned you, ok?");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      block(env, morph0, context, "gh-modal-dialog", [], {"action": "closeModal", "type": "action", "style": "wide", "title": "Would you really like to delete all content from your blog?", "confirm": get(env, context, "confirm")}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/modals/delete-post', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("\n    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("p");
+        var el2 = dom.createTextNode("You're about to delete \"");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("strong");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\".");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("br");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("This is permanent! No backups, no restores, no magic undo button. ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("br");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode(" We warned you, ok?");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, content = hooks.content;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(dom.childAt(fragment, [1, 1]),-1,-1);
+        content(env, morph0, context, "model.title");
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      block(env, morph0, context, "gh-modal-dialog", [], {"action": "closeModal", "showClose": true, "type": "action", "style": "wide", "title": "Are you sure you want to delete this post?", "confirm": get(env, context, "confirm")}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/modals/delete-tag', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    var child0 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("        ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("strong");
+          var el2 = dom.createTextNode("WARNING:");
+          dom.appendChild(el1, el2);
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode(" ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("span");
+          dom.setAttribute(el1,"class","red");
+          var el2 = dom.createTextNode("This tag is attached to ");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode(" ");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode(".");
+          dom.appendChild(el1, el2);
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode(" You're about to delete \"");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("strong");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\". This is permanent! No backups, no restores, no magic undo button. We warned you, ok?\n");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, content = hooks.content;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          var element0 = dom.childAt(fragment, [3]);
+          var morph0 = dom.createMorphAt(element0,0,1);
+          var morph1 = dom.createMorphAt(element0,1,2);
+          var morph2 = dom.createMorphAt(dom.childAt(fragment, [5]),-1,-1);
+          content(env, morph0, context, "model.post_count");
+          content(env, morph1, context, "postInflection");
+          content(env, morph2, context, "model.name");
+          return fragment;
+        }
+      };
+    }());
+    var child1 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("        ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("strong");
+          var el2 = dom.createTextNode("WARNING:");
+          dom.appendChild(el1, el2);
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode(" You're about to delete \"");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("strong");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\". This is permanent! No backups, no restores, no magic undo button. We warned you, ok?\n");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, content = hooks.content;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          var morph0 = dom.createMorphAt(dom.childAt(fragment, [3]),-1,-1);
+          content(env, morph0, context, "model.name");
+          return fragment;
+        }
+      };
+    }());
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, block = hooks.block;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        if (this.cachedFragment) { dom.repairClonedNode(fragment,[1]); }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        block(env, morph0, context, "if", [get(env, context, "model.post_count")], {}, child0, child1);
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      block(env, morph0, context, "gh-modal-dialog", [], {"action": "closeModal", "showClose": true, "type": "action", "style": "wide", "title": "Are you sure you want to delete this tag?", "confirm": get(env, context, "confirm")}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/modals/delete-user', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    var child0 = (function() {
+      var child0 = (function() {
+        return {
+          isHTMLBars: true,
+          blockParams: 0,
+          cachedFragment: null,
+          hasRendered: false,
+          build: function build(dom) {
+            var el0 = dom.createDocumentFragment();
+            var el1 = dom.createTextNode("            ");
+            dom.appendChild(el0, el1);
+            var el1 = dom.createElement("strong");
+            var el2 = dom.createTextNode("WARNING:");
+            dom.appendChild(el1, el2);
+            dom.appendChild(el0, el1);
+            var el1 = dom.createTextNode(" ");
+            dom.appendChild(el0, el1);
+            var el1 = dom.createElement("span");
+            dom.setAttribute(el1,"class","red");
+            var el2 = dom.createTextNode("This user is the author of ");
+            dom.appendChild(el1, el2);
+            var el2 = dom.createTextNode(" ");
+            dom.appendChild(el1, el2);
+            var el2 = dom.createTextNode(".");
+            dom.appendChild(el1, el2);
+            dom.appendChild(el0, el1);
+            var el1 = dom.createTextNode(" All posts and user data will be deleted. There is no way to recover this.\n");
+            dom.appendChild(el0, el1);
+            return el0;
+          },
+          render: function render(context, env, contextualElement) {
+            var dom = env.dom;
+            var hooks = env.hooks, content = hooks.content;
+            dom.detectNamespace(contextualElement);
+            var fragment;
+            if (env.useFragmentCache && dom.canClone) {
+              if (this.cachedFragment === null) {
+                fragment = this.build(dom);
+                if (this.hasRendered) {
+                  this.cachedFragment = fragment;
+                } else {
+                  this.hasRendered = true;
+                }
+              }
+              if (this.cachedFragment) {
+                fragment = dom.cloneNode(this.cachedFragment, true);
+              }
+            } else {
+              fragment = this.build(dom);
+            }
+            var element0 = dom.childAt(fragment, [3]);
+            var morph0 = dom.createMorphAt(element0,0,1);
+            var morph1 = dom.createMorphAt(element0,1,2);
+            content(env, morph0, context, "userPostCount.count");
+            content(env, morph1, context, "userPostCount.inflection");
+            return fragment;
+          }
+        };
+      }());
+      var child1 = (function() {
+        return {
+          isHTMLBars: true,
+          blockParams: 0,
+          cachedFragment: null,
+          hasRendered: false,
+          build: function build(dom) {
+            var el0 = dom.createDocumentFragment();
+            var el1 = dom.createTextNode("            ");
+            dom.appendChild(el0, el1);
+            var el1 = dom.createElement("strong");
+            var el2 = dom.createTextNode("WARNING:");
+            dom.appendChild(el1, el2);
+            dom.appendChild(el0, el1);
+            var el1 = dom.createTextNode(" All user data will be deleted. There is no way to recover this.\n");
+            dom.appendChild(el0, el1);
+            return el0;
+          },
+          render: function render(context, env, contextualElement) {
+            var dom = env.dom;
+            dom.detectNamespace(contextualElement);
+            var fragment;
+            if (env.useFragmentCache && dom.canClone) {
+              if (this.cachedFragment === null) {
+                fragment = this.build(dom);
+                if (this.hasRendered) {
+                  this.cachedFragment = fragment;
+                } else {
+                  this.hasRendered = true;
+                }
+              }
+              if (this.cachedFragment) {
+                fragment = dom.cloneNode(this.cachedFragment, true);
+              }
+            } else {
+              fragment = this.build(dom);
+            }
+            return fragment;
+          }
+        };
+      }());
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, get = hooks.get, block = hooks.block;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+          var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+          block(env, morph0, context, "if", [get(env, context, "userPostCount.count")], {}, child0, child1);
+          return fragment;
+        }
+      };
+    }());
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, block = hooks.block;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        block(env, morph0, context, "unless", [get(env, context, "userPostCount.isPending")], {}, child0, null);
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      block(env, morph0, context, "gh-modal-dialog", [], {"action": "closeModal", "showClose": true, "type": "action", "style": "wide", "title": "Are you sure you want to delete this user?", "confirm": get(env, context, "confirm")}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/modals/invite-new-user', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("\n        ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("fieldset");
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("div");
+        dom.setAttribute(el2,"class","form-group");
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("label");
+        dom.setAttribute(el3,"for","new-user-email");
+        var el4 = dom.createTextNode("Email Address");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n            ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n\n            ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("div");
+        dom.setAttribute(el2,"class","form-group for-select");
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("label");
+        dom.setAttribute(el3,"for","new-user-role");
+        var el4 = dom.createTextNode("Role");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n            ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n\n        ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, inline = hooks.inline;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element0 = dom.childAt(fragment, [1]);
+        var morph0 = dom.createMorphAt(dom.childAt(element0, [1]),2,3);
+        var morph1 = dom.createMorphAt(dom.childAt(element0, [3]),2,3);
+        inline(env, morph0, context, "input", [], {"action": "confirmAccept", "class": "email", "id": "new-user-email", "type": "email", "placeholder": "Email Address", "name": "email", "autofocus": "autofocus", "autocapitalize": "off", "autocorrect": "off", "value": get(env, context, "email")});
+        inline(env, morph1, context, "gh-role-selector", [], {"initialValue": get(env, context, "authorRole"), "onChange": "setRole", "selectId": "new-user-role"});
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      block(env, morph0, context, "gh-modal-dialog", [], {"action": "closeModal", "showClose": true, "type": "action", "title": "Invite a New User", "confirm": get(env, context, "confirm"), "class": "invite-new-user"}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/modals/leave-editor', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("\n    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("p");
+        var el2 = dom.createTextNode("Hey there! It looks like you're in the middle of writing something and you haven't saved all of your\n    content.");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n\n    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("p");
+        var el2 = dom.createTextNode("Save before you go!");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      block(env, morph0, context, "gh-modal-dialog", [], {"action": "closeModal", "showClose": true, "type": "action", "style": "wide", "title": "Are you sure you want to leave this page?", "confirm": get(env, context, "confirm")}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/modals/markdown', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("section");
+        dom.setAttribute(el1,"class","markdown-help-container");
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("table");
+        dom.setAttribute(el2,"class","modal-markdown-help-table");
+        var el3 = dom.createTextNode("\n            ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("thead");
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("tr");
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("th");
+        var el6 = dom.createTextNode("Result");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("th");
+        var el6 = dom.createTextNode("Markdown");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("th");
+        var el6 = dom.createTextNode("Shortcut");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n            ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n            ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("tbody");
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("tr");
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createElement("strong");
+        var el7 = dom.createTextNode("Bold");
+        dom.appendChild(el6, el7);
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("**text**");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("Ctrl/⌘ + B ");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n            ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("tr");
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createElement("em");
+        var el7 = dom.createTextNode("Emphasize");
+        dom.appendChild(el6, el7);
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("*text*");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("Ctrl/⌘ + I");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n            ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("tr");
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createElement("del");
+        var el7 = dom.createTextNode("Strike-through");
+        dom.appendChild(el6, el7);
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("~~text~~");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("Ctrl + Alt + U");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n            ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("tr");
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createElement("a");
+        dom.setAttribute(el6,"href","#");
+        var el7 = dom.createTextNode("Link");
+        dom.appendChild(el6, el7);
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("[title](http://)");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("Ctrl/⌘ + K");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n            ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("tr");
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createElement("code");
+        var el7 = dom.createTextNode("Inline Code");
+        dom.appendChild(el6, el7);
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("`code`");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("Ctrl/⌘ + Shift + K");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n            ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("tr");
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("Image");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("![alt](http://)");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("Ctrl/⌘ + Shift + I");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n            ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("tr");
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("List");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("* item");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("Ctrl + L");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n            ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("tr");
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("Blockquote");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("> quote");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("Ctrl + Q");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n            ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("tr");
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createElement("mark");
+        var el7 = dom.createTextNode("Highlight");
+        dom.appendChild(el6, el7);
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("==Highlight==");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n            ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("tr");
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("H1");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("# Heading");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n            ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("tr");
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("H2");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("## Heading");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("Ctrl/⌘ + H");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n            ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("tr");
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("H3");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("### Heading");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("td");
+        var el6 = dom.createTextNode("Ctrl/⌘ + H (x2)");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n            ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n        ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n        For further Markdown syntax reference: ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("a");
+        dom.setAttribute(el2,"href","http://support.ghost.org/markdown-guide/");
+        dom.setAttribute(el2,"target","_blank");
+        var el3 = dom.createTextNode("Markdown Documentation");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n    ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      block(env, morph0, context, "gh-modal-dialog", [], {"action": "closeModal", "showClose": true, "style": "wide", "title": "Markdown Help"}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/modals/signin', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("\n        ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("form");
+        dom.setAttribute(el1,"id","login");
+        dom.setAttribute(el1,"class","login-form");
+        dom.setAttribute(el1,"method","post");
+        dom.setAttribute(el1,"novalidate","novalidate");
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("div");
+        dom.setAttribute(el2,"class","password-wrap");
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n            ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("button");
+        dom.setAttribute(el2,"class","btn btn-blue");
+        dom.setAttribute(el2,"type","submit");
+        var el3 = dom.createTextNode("Log in");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n       ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, element = hooks.element, get = hooks.get, inline = hooks.inline;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element0 = dom.childAt(fragment, [1]);
+        var element1 = dom.childAt(element0, [3]);
+        var morph0 = dom.createMorphAt(dom.childAt(element0, [1]),0,1);
+        element(env, element0, context, "action", ["validateAndAuthenticate"], {"on": "submit"});
+        inline(env, morph0, context, "input", [], {"class": "password", "type": "password", "placeholder": "Password", "name": "password", "value": get(env, context, "password")});
+        element(env, element1, context, "action", ["validateAndAuthenticate"], {});
+        element(env, element1, context, "bind-attr", [], {"disabled": get(env, context, "submitting")});
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      block(env, morph0, context, "gh-modal-dialog", [], {"action": "closeModal", "showClose": true, "type": "action", "style": "wide", "animation": "fade", "title": "Please re-authenticate", "confirm": get(env, context, "confirm")}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/modals/transfer-owner', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("\n    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("p");
+        var el2 = dom.createTextNode("Are you sure you want to transfer the ownership of this blog? You will not be able to undo this action.");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      block(env, morph0, context, "gh-modal-dialog", [], {"action": "closeModal", "showClose": true, "type": "action", "style": "wide", "title": "Transfer Ownership", "confirm": get(env, context, "confirm")}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/modals/upload', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("  ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("section");
+        dom.setAttribute(el1,"class","js-drop-zone");
+        var el2 = dom.createTextNode("\n      ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("img");
+        dom.setAttribute(el2,"class","js-upload-target");
+        dom.setAttribute(el2,"alt","logo");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n      ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("input");
+        dom.setAttribute(el2,"data-url","upload");
+        dom.setAttribute(el2,"class","js-fileupload main");
+        dom.setAttribute(el2,"type","file");
+        dom.setAttribute(el2,"name","uploadimage");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n  ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, element = hooks.element;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element0 = dom.childAt(fragment, [1]);
+        var element1 = dom.childAt(element0, [1]);
+        var element2 = dom.childAt(element0, [3]);
+        element(env, element1, context, "bind-attr", [], {"src": get(env, context, "src")});
+        element(env, element2, context, "bind-attr", [], {"accept": get(env, context, "acceptEncoding")});
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      block(env, morph0, context, "gh-upload-modal", [], {"action": "closeModal", "close": true, "type": "action", "style": "wide", "model": get(env, context, "model"), "imageType": get(env, context, "imageType")}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/post-settings-menu', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    var child0 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("            ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("div");
+          dom.setAttribute(el1,"class","form-group for-select");
+          var el2 = dom.createTextNode("\n                ");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createElement("label");
+          dom.setAttribute(el2,"for","author-list");
+          var el3 = dom.createTextNode("Author");
+          dom.appendChild(el2, el3);
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode("\n                ");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createElement("span");
+          dom.setAttribute(el2,"class","input-icon icon-user");
+          var el3 = dom.createTextNode("\n                    ");
+          dom.appendChild(el2, el3);
+          var el3 = dom.createElement("span");
+          dom.setAttribute(el3,"class","gh-select");
+          dom.setAttribute(el3,"tabindex","0");
+          var el4 = dom.createTextNode("\n                    ");
+          dom.appendChild(el3, el4);
+          var el4 = dom.createTextNode("\n                    ");
+          dom.appendChild(el3, el4);
+          dom.appendChild(el2, el3);
+          var el3 = dom.createTextNode("\n                ");
+          dom.appendChild(el2, el3);
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode("\n            ");
+          dom.appendChild(el1, el2);
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, get = hooks.get, inline = hooks.inline;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          var morph0 = dom.createMorphAt(dom.childAt(fragment, [1, 3, 1]),0,1);
+          inline(env, morph0, context, "view", ["select"], {"name": "post-setting-author", "id": "author-list", "content": get(env, context, "authors"), "optionValuePath": "content.id", "optionLabelPath": "content.name", "selection": get(env, context, "selectedAuthor")});
+          return fragment;
+        }
+      };
+    }());
+    var child1 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("                    ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("button");
+          dom.setAttribute(el1,"type","button");
+          var el2 = dom.createTextNode("\n                        ");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createElement("b");
+          var el3 = dom.createTextNode("Meta Data");
+          dom.appendChild(el2, el3);
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode("\n                        ");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createElement("span");
+          var el3 = dom.createTextNode("Extra content for SEO and social media.");
+          dom.appendChild(el2, el3);
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode("\n                    ");
+          dom.appendChild(el1, el2);
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          return fragment;
+        }
+      };
+    }());
+    var child2 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("        ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("div");
+          dom.setAttribute(el1,"class","settings-menu-header subview");
+          var el2 = dom.createTextNode("\n            ");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createElement("button");
+          dom.setAttribute(el2,"class","back icon-chevron-left settings-menu-header-action");
+          var el3 = dom.createElement("span");
+          dom.setAttribute(el3,"class","hidden");
+          var el4 = dom.createTextNode("Back");
+          dom.appendChild(el3, el4);
+          dom.appendChild(el2, el3);
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode("\n            ");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createElement("h4");
+          var el3 = dom.createTextNode("Meta Data");
+          dom.appendChild(el2, el3);
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode("\n        ");
+          dom.appendChild(el1, el2);
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n\n        ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("div");
+          dom.setAttribute(el1,"class","settings-menu-content");
+          var el2 = dom.createTextNode("\n            ");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createElement("form");
+          var el3 = dom.createTextNode("\n            ");
+          dom.appendChild(el2, el3);
+          var el3 = dom.createElement("div");
+          dom.setAttribute(el3,"class","form-group");
+          var el4 = dom.createTextNode("\n                ");
+          dom.appendChild(el3, el4);
+          var el4 = dom.createElement("label");
+          dom.setAttribute(el4,"for","meta-title");
+          var el5 = dom.createTextNode("Meta Title");
+          dom.appendChild(el4, el5);
+          dom.appendChild(el3, el4);
+          var el4 = dom.createTextNode("\n                ");
+          dom.appendChild(el3, el4);
+          var el4 = dom.createTextNode("\n                ");
+          dom.appendChild(el3, el4);
+          var el4 = dom.createElement("p");
+          var el5 = dom.createTextNode("Recommended: ");
+          dom.appendChild(el4, el5);
+          var el5 = dom.createElement("b");
+          var el6 = dom.createTextNode("70");
+          dom.appendChild(el5, el6);
+          dom.appendChild(el4, el5);
+          var el5 = dom.createTextNode(" characters. You’ve used ");
+          dom.appendChild(el4, el5);
+          dom.appendChild(el3, el4);
+          var el4 = dom.createTextNode("\n            ");
+          dom.appendChild(el3, el4);
+          dom.appendChild(el2, el3);
+          var el3 = dom.createTextNode("\n\n            ");
+          dom.appendChild(el2, el3);
+          var el3 = dom.createElement("div");
+          dom.setAttribute(el3,"class","form-group");
+          var el4 = dom.createTextNode("\n                ");
+          dom.appendChild(el3, el4);
+          var el4 = dom.createElement("label");
+          dom.setAttribute(el4,"for","meta-description");
+          var el5 = dom.createTextNode("Meta Description");
+          dom.appendChild(el4, el5);
+          dom.appendChild(el3, el4);
+          var el4 = dom.createTextNode("\n                ");
+          dom.appendChild(el3, el4);
+          var el4 = dom.createTextNode("\n                ");
+          dom.appendChild(el3, el4);
+          var el4 = dom.createElement("p");
+          var el5 = dom.createTextNode("Recommended: ");
+          dom.appendChild(el4, el5);
+          var el5 = dom.createElement("b");
+          var el6 = dom.createTextNode("156");
+          dom.appendChild(el5, el6);
+          dom.appendChild(el4, el5);
+          var el5 = dom.createTextNode(" characters. You’ve used ");
+          dom.appendChild(el4, el5);
+          dom.appendChild(el3, el4);
+          var el4 = dom.createTextNode("\n            ");
+          dom.appendChild(el3, el4);
+          dom.appendChild(el2, el3);
+          var el3 = dom.createTextNode("\n\n            ");
+          dom.appendChild(el2, el3);
+          var el3 = dom.createElement("div");
+          dom.setAttribute(el3,"class","form-group");
+          var el4 = dom.createTextNode("\n                ");
+          dom.appendChild(el3, el4);
+          var el4 = dom.createElement("label");
+          var el5 = dom.createTextNode("Search Engine Result Preview");
+          dom.appendChild(el4, el5);
+          dom.appendChild(el3, el4);
+          var el4 = dom.createTextNode("\n                ");
+          dom.appendChild(el3, el4);
+          var el4 = dom.createElement("div");
+          dom.setAttribute(el4,"class","seo-preview");
+          var el5 = dom.createTextNode("\n                    ");
+          dom.appendChild(el4, el5);
+          var el5 = dom.createElement("div");
+          dom.setAttribute(el5,"class","seo-preview-title");
+          dom.appendChild(el4, el5);
+          var el5 = dom.createTextNode("\n                    ");
+          dom.appendChild(el4, el5);
+          var el5 = dom.createElement("div");
+          dom.setAttribute(el5,"class","seo-preview-link");
+          dom.appendChild(el4, el5);
+          var el5 = dom.createTextNode("\n                    ");
+          dom.appendChild(el4, el5);
+          var el5 = dom.createElement("div");
+          dom.setAttribute(el5,"class","seo-preview-description");
+          dom.appendChild(el4, el5);
+          var el5 = dom.createTextNode("\n                ");
+          dom.appendChild(el4, el5);
+          dom.appendChild(el3, el4);
+          var el4 = dom.createTextNode("\n            ");
+          dom.appendChild(el3, el4);
+          dom.appendChild(el2, el3);
+          var el3 = dom.createTextNode("\n            ");
+          dom.appendChild(el2, el3);
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode("\n        ");
+          dom.appendChild(el1, el2);
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, element = hooks.element, get = hooks.get, inline = hooks.inline, content = hooks.content;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          var element0 = dom.childAt(fragment, [1, 1]);
+          var element1 = dom.childAt(fragment, [3, 1]);
+          var element2 = dom.childAt(element1, [1]);
+          var element3 = dom.childAt(element1, [3]);
+          var element4 = dom.childAt(element1, [5, 3]);
+          var morph0 = dom.createMorphAt(element2,2,3);
+          var morph1 = dom.createMorphAt(dom.childAt(element2, [4]),2,-1);
+          var morph2 = dom.createMorphAt(element3,2,3);
+          var morph3 = dom.createMorphAt(dom.childAt(element3, [4]),2,-1);
+          var morph4 = dom.createMorphAt(dom.childAt(element4, [1]),-1,-1);
+          var morph5 = dom.createMorphAt(dom.childAt(element4, [3]),-1,-1);
+          var morph6 = dom.createMorphAt(dom.childAt(element4, [5]),-1,-1);
+          element(env, element0, context, "action", ["closeSubview"], {});
+          inline(env, morph0, context, "gh-input", [], {"class": "post-setting-meta-title", "id": "meta-title", "value": get(env, context, "metaTitleScratch"), "name": "post-setting-meta-title", "focus-out": "setMetaTitle", "stopEnterKeyDownPropagation": "true"});
+          inline(env, morph1, context, "gh-count-down-characters", [get(env, context, "metaTitleScratch"), 70], {});
+          inline(env, morph2, context, "gh-textarea", [], {"class": "post-setting-meta-description", "id": "meta-description", "value": get(env, context, "metaDescriptionScratch"), "name": "post-setting-meta-description", "focus-out": "setMetaDescription", "stopEnterKeyDownPropagation": "true"});
+          inline(env, morph3, context, "gh-count-down-characters", [get(env, context, "metaDescriptionScratch"), 156], {});
+          content(env, morph4, context, "seoTitle");
+          content(env, morph5, context, "seoURL");
+          content(env, morph6, context, "seoDescription");
+          return fragment;
+        }
+      };
+    }());
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createElement("div");
+        dom.setAttribute(el1,"id","entry-controls");
+        var el2 = dom.createTextNode("\n    ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("div");
+        var el3 = dom.createTextNode("\n        ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("div");
+        dom.setAttribute(el3,"class","settings-menu-header");
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("h4");
+        var el5 = dom.createTextNode("Post Settings");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("button");
+        dom.setAttribute(el4,"class","close icon-x settings-menu-header-action");
+        var el5 = dom.createElement("span");
+        dom.setAttribute(el5,"class","hidden");
+        var el6 = dom.createTextNode("Close");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n        ");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n        ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("div");
+        dom.setAttribute(el3,"class","settings-menu-content");
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("form");
+        var el5 = dom.createTextNode("\n            ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("div");
+        dom.setAttribute(el5,"class","form-group");
+        var el6 = dom.createTextNode("\n                ");
+        dom.appendChild(el5, el6);
+        var el6 = dom.createElement("label");
+        dom.setAttribute(el6,"for","url");
+        var el7 = dom.createTextNode("Post URL");
+        dom.appendChild(el6, el7);
+        dom.appendChild(el5, el6);
+        var el6 = dom.createTextNode("\n                ");
+        dom.appendChild(el5, el6);
+        var el6 = dom.createElement("span");
+        dom.setAttribute(el6,"class","input-icon icon-link");
+        var el7 = dom.createTextNode("\n                    ");
+        dom.appendChild(el6, el7);
+        var el7 = dom.createTextNode("\n                ");
+        dom.appendChild(el6, el7);
+        dom.appendChild(el5, el6);
+        var el6 = dom.createTextNode("\n                ");
+        dom.appendChild(el5, el6);
+        var el6 = dom.createTextNode("\n            ");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n\n            ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("div");
+        dom.setAttribute(el5,"class","form-group");
+        var el6 = dom.createTextNode("\n                ");
+        dom.appendChild(el5, el6);
+        var el6 = dom.createElement("label");
+        dom.setAttribute(el6,"for","post-setting-date");
+        var el7 = dom.createTextNode("Publish Date");
+        dom.appendChild(el6, el7);
+        dom.appendChild(el5, el6);
+        var el6 = dom.createTextNode("\n                ");
+        dom.appendChild(el5, el6);
+        var el6 = dom.createElement("span");
+        dom.setAttribute(el6,"class","input-icon icon-calendar");
+        var el7 = dom.createTextNode("\n                    ");
+        dom.appendChild(el6, el7);
+        var el7 = dom.createTextNode("\n                ");
+        dom.appendChild(el6, el7);
+        dom.appendChild(el5, el6);
+        var el6 = dom.createTextNode("\n            ");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n\n");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n            ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("ul");
+        dom.setAttribute(el5,"class","nav-list nav-list-block");
+        var el6 = dom.createTextNode("\n");
+        dom.appendChild(el5, el6);
+        var el6 = dom.createTextNode("            ");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n\n            ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("div");
+        dom.setAttribute(el5,"class","form-group for-checkbox");
+        var el6 = dom.createTextNode("\n                ");
+        dom.appendChild(el5, el6);
+        var el6 = dom.createElement("label");
+        dom.setAttribute(el6,"class","checkbox");
+        dom.setAttribute(el6,"for","static-page");
+        var el7 = dom.createTextNode("\n                    ");
+        dom.appendChild(el6, el7);
+        var el7 = dom.createTextNode("\n                    ");
+        dom.appendChild(el6, el7);
+        var el7 = dom.createElement("span");
+        dom.setAttribute(el7,"class","input-toggle-component");
+        dom.appendChild(el6, el7);
+        var el7 = dom.createTextNode("\n                    ");
+        dom.appendChild(el6, el7);
+        var el7 = dom.createElement("p");
+        var el8 = dom.createTextNode("Turn this post into a static page");
+        dom.appendChild(el7, el8);
+        dom.appendChild(el6, el7);
+        var el7 = dom.createTextNode("\n                ");
+        dom.appendChild(el6, el7);
+        dom.appendChild(el5, el6);
+        var el6 = dom.createTextNode("\n\n                ");
+        dom.appendChild(el5, el6);
+        var el6 = dom.createElement("label");
+        dom.setAttribute(el6,"class","checkbox");
+        dom.setAttribute(el6,"for","featured");
+        var el7 = dom.createTextNode("\n                    ");
+        dom.appendChild(el6, el7);
+        var el7 = dom.createTextNode("\n                    ");
+        dom.appendChild(el6, el7);
+        var el7 = dom.createElement("span");
+        dom.setAttribute(el7,"class","input-toggle-component");
+        dom.appendChild(el6, el7);
+        var el7 = dom.createTextNode("\n                    ");
+        dom.appendChild(el6, el7);
+        var el7 = dom.createElement("p");
+        var el8 = dom.createTextNode("Feature this post");
+        dom.appendChild(el7, el8);
+        dom.appendChild(el6, el7);
+        var el7 = dom.createTextNode("\n                ");
+        dom.appendChild(el6, el7);
+        dom.appendChild(el5, el6);
+        var el6 = dom.createTextNode("\n            ");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n\n            ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n        ");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n    ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n\n    ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("div");
+        var el3 = dom.createTextNode("\n");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("    ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, element = hooks.element, get = hooks.get, inline = hooks.inline, block = hooks.block;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element5 = dom.childAt(fragment, [0]);
+        var element6 = dom.childAt(element5, [1]);
+        var element7 = dom.childAt(element6, [1, 3]);
+        var element8 = dom.childAt(element6, [3]);
+        var element9 = dom.childAt(element8, [2]);
+        var element10 = dom.childAt(element9, [1]);
+        var element11 = dom.childAt(element9, [8]);
+        var element12 = dom.childAt(element11, [1]);
+        var element13 = dom.childAt(element11, [3]);
+        var element14 = dom.childAt(element5, [3]);
+        var morph0 = dom.createMorphAt(element8,0,1);
+        var morph1 = dom.createMorphAt(dom.childAt(element10, [3]),0,1);
+        var morph2 = dom.createMorphAt(element10,4,5);
+        var morph3 = dom.createMorphAt(dom.childAt(element9, [3, 3]),0,1);
+        var morph4 = dom.createMorphAt(element9,4,5);
+        var morph5 = dom.createMorphAt(dom.childAt(element9, [6]),0,1);
+        var morph6 = dom.createMorphAt(element12,0,1);
+        var morph7 = dom.createMorphAt(element13,0,1);
+        var morph8 = dom.createMorphAt(element14,0,1);
+        element(env, element6, context, "bind-attr", [], {"class": "isViewingSubview:settings-menu-pane-out-left:settings-menu-pane-in :settings-menu :settings-menu-pane"});
+        element(env, element7, context, "action", ["closeSettingsMenu"], {});
+        inline(env, morph0, context, "gh-uploader", [], {"uploaded": "setCoverImage", "canceled": "clearCoverImage", "description": "Add post image", "image": get(env, context, "model.image"), "uploaderReference": get(env, context, "uploaderReference"), "tagName": "section"});
+        inline(env, morph1, context, "gh-input", [], {"class": "post-setting-slug", "id": "url", "value": get(env, context, "slugValue"), "name": "post-setting-slug", "focus-out": "updateSlug", "selectOnClick": "true", "stopEnterKeyDownPropagation": "true"});
+        inline(env, morph2, context, "gh-url-preview", [], {"slug": get(env, context, "slugValue"), "tagName": "p", "classNames": "description"});
+        inline(env, morph3, context, "gh-input", [], {"class": "post-setting-date", "id": "post-setting-date", "value": get(env, context, "publishedAtValue"), "name": "post-setting-date", "focus-out": "setPublishedAt", "stopEnterKeyDownPropagation": "true"});
+        block(env, morph4, context, "unless", [get(env, context, "session.user.isAuthor")], {}, child0, null);
+        block(env, morph5, context, "gh-tab", [], {"tagName": "li", "classNames": "nav-list-item"}, child1, null);
+        element(env, element12, context, "action", ["togglePage"], {"bubbles": "false"});
+        inline(env, morph6, context, "input", [], {"type": "checkbox", "name": "static-page", "id": "static-page", "class": "post-setting-static-page", "checked": get(env, context, "model.page")});
+        element(env, element13, context, "action", ["toggleFeatured"], {"bubbles": "false"});
+        inline(env, morph7, context, "input", [], {"type": "checkbox", "name": "featured", "id": "featured", "class": "post-setting-featured", "checked": get(env, context, "model.featured")});
+        element(env, element14, context, "bind-attr", [], {"class": "isViewingSubview:settings-menu-pane-in:settings-menu-pane-out-right :settings-menu :settings-menu-pane"});
+        block(env, morph8, context, "gh-tab-pane", [], {}, child2, null);
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("div");
+      dom.setAttribute(el1,"class","content-cover");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, element = hooks.element, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[2]); }
+      var element15 = dom.childAt(fragment, [0]);
+      var morph0 = dom.createMorphAt(fragment,1,2,contextualElement);
+      element(env, element15, context, "action", ["closeSettingsMenu"], {});
+      block(env, morph0, context, "gh-tabs-manager", [], {"selected": "showSubview", "id": "entry-controls", "class": "settings-menu-container"}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/post-tags-input', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("           ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("span");
+        dom.setAttribute(el1,"class","tag");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, element = hooks.element, content = hooks.content;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element0 = dom.childAt(fragment, [1]);
+        var morph0 = dom.createMorphAt(element0,-1,-1);
+        element(env, element0, context, "action", ["deleteTag", get(env, context, "tag")], {"target": get(env, context, "view")});
+        content(env, morph0, context, "tag.name");
+        return fragment;
+      }
+    };
+  }());
+  var child1 = (function() {
+    var child0 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("                ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("a");
+          dom.setAttribute(el1,"href","javascript:void(0);");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, content = hooks.content;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          var morph0 = dom.createMorphAt(dom.childAt(fragment, [1]),-1,-1);
+          content(env, morph0, context, "view.suggestion.highlightedName");
+          return fragment;
+        }
+      };
+    }());
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, block = hooks.block;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        block(env, morph0, context, "view", [get(env, context, "view.suggestionView")], {"suggestion": get(env, context, "suggestion")}, child0, null);
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("div");
+      dom.setAttribute(el1,"class","publish-bar-tags-icon");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("label");
+      dom.setAttribute(el2,"class","tag-label icon-tag");
+      dom.setAttribute(el2,"for","tags");
+      dom.setAttribute(el2,"title","Tags");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("span");
+      dom.setAttribute(el3,"class","hidden");
+      var el4 = dom.createTextNode("Tags");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("div");
+      dom.setAttribute(el1,"class","publish-bar-tags");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("div");
+      dom.setAttribute(el2,"class","tags-wrapper tags");
+      var el3 = dom.createTextNode("\n");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("div");
+      dom.setAttribute(el1,"class","publish-bar-tags-input");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("input");
+      dom.setAttribute(el2,"type","hidden");
+      dom.setAttribute(el2,"class","tags-holder");
+      dom.setAttribute(el2,"id","tags-holder");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("ul");
+      dom.setAttribute(el2,"class","suggestions dropdown-menu dropdown-triangle-bottom");
+      var el3 = dom.createTextNode("\n");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block, inline = hooks.inline, element = hooks.element;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element1 = dom.childAt(fragment, [4]);
+      var element2 = dom.childAt(element1, [4]);
+      var morph0 = dom.createMorphAt(dom.childAt(fragment, [2, 1]),0,1);
+      var morph1 = dom.createMorphAt(element1,2,3);
+      var morph2 = dom.createMorphAt(element2,0,1);
+      block(env, morph0, context, "each", [get(env, context, "controller.tags")], {"keyword": "tag"}, child0, null);
+      inline(env, morph1, context, "view", [get(env, context, "view.tagInputView")], {"class": "tag-input js-tag-input", "id": "tags", "value": get(env, context, "newTagText")});
+      element(env, element2, context, "bind-attr", [], {"style": get(env, context, "view.overlayStyles")});
+      block(env, morph2, context, "each", [get(env, context, "suggestions")], {"keyword": "suggestion"}, child1, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/posts', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createElement("span");
+        dom.setAttribute(el0,"class","hidden");
+        var el1 = dom.createTextNode("New Post");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  var child1 = (function() {
+    var child0 = (function() {
+      var child0 = (function() {
+        var child0 = (function() {
+          var child0 = (function() {
+            return {
+              isHTMLBars: true,
+              blockParams: 0,
+              cachedFragment: null,
+              hasRendered: false,
+              build: function build(dom) {
+                var el0 = dom.createDocumentFragment();
+                var el1 = dom.createTextNode("                                    ");
+                dom.appendChild(el0, el1);
+                var el1 = dom.createElement("span");
+                dom.setAttribute(el1,"class","page");
+                var el2 = dom.createTextNode("Page");
+                dom.appendChild(el1, el2);
+                dom.appendChild(el0, el1);
+                var el1 = dom.createTextNode("\n");
+                dom.appendChild(el0, el1);
+                return el0;
+              },
+              render: function render(context, env, contextualElement) {
+                var dom = env.dom;
+                dom.detectNamespace(contextualElement);
+                var fragment;
+                if (env.useFragmentCache && dom.canClone) {
+                  if (this.cachedFragment === null) {
+                    fragment = this.build(dom);
+                    if (this.hasRendered) {
+                      this.cachedFragment = fragment;
+                    } else {
+                      this.hasRendered = true;
+                    }
+                  }
+                  if (this.cachedFragment) {
+                    fragment = dom.cloneNode(this.cachedFragment, true);
+                  }
+                } else {
+                  fragment = this.build(dom);
+                }
+                return fragment;
+              }
+            };
+          }());
+          var child1 = (function() {
+            return {
+              isHTMLBars: true,
+              blockParams: 0,
+              cachedFragment: null,
+              hasRendered: false,
+              build: function build(dom) {
+                var el0 = dom.createDocumentFragment();
+                var el1 = dom.createTextNode("                                    ");
+                dom.appendChild(el0, el1);
+                var el1 = dom.createElement("time");
+                dom.setAttribute(el1,"class","date published");
+                var el2 = dom.createTextNode("\n                                        Published ");
+                dom.appendChild(el1, el2);
+                var el2 = dom.createTextNode("\n                                    ");
+                dom.appendChild(el1, el2);
+                dom.appendChild(el0, el1);
+                var el1 = dom.createTextNode("\n");
+                dom.appendChild(el0, el1);
+                return el0;
+              },
+              render: function render(context, env, contextualElement) {
+                var dom = env.dom;
+                var hooks = env.hooks, get = hooks.get, subexpr = hooks.subexpr, concat = hooks.concat, attribute = hooks.attribute, inline = hooks.inline;
+                dom.detectNamespace(contextualElement);
+                var fragment;
+                if (env.useFragmentCache && dom.canClone) {
+                  if (this.cachedFragment === null) {
+                    fragment = this.build(dom);
+                    if (this.hasRendered) {
+                      this.cachedFragment = fragment;
+                    } else {
+                      this.hasRendered = true;
+                    }
+                  }
+                  if (this.cachedFragment) {
+                    fragment = dom.cloneNode(this.cachedFragment, true);
+                  }
+                } else {
+                  fragment = this.build(dom);
+                }
+                var element0 = dom.childAt(fragment, [1]);
+                var morph0 = dom.createMorphAt(element0,0,1);
+                var attrMorph0 = dom.createAttrMorph(element0, 'datetime');
+                attribute(env, attrMorph0, element0, "datetime", concat(env, [subexpr(env, context, "unbound", [get(env, context, "post.model.published_at")], {})]));
+                inline(env, morph0, context, "gh-format-timeago", [get(env, context, "post.model.published_at")], {});
+                return fragment;
+              }
+            };
+          }());
+          return {
+            isHTMLBars: true,
+            blockParams: 0,
+            cachedFragment: null,
+            hasRendered: false,
+            build: function build(dom) {
+              var el0 = dom.createDocumentFragment();
+              var el1 = dom.createTextNode("");
+              dom.appendChild(el0, el1);
+              var el1 = dom.createTextNode("");
+              dom.appendChild(el0, el1);
+              return el0;
+            },
+            render: function render(context, env, contextualElement) {
+              var dom = env.dom;
+              var hooks = env.hooks, get = hooks.get, block = hooks.block;
+              dom.detectNamespace(contextualElement);
+              var fragment;
+              if (env.useFragmentCache && dom.canClone) {
+                if (this.cachedFragment === null) {
+                  fragment = this.build(dom);
+                  if (this.hasRendered) {
+                    this.cachedFragment = fragment;
+                  } else {
+                    this.hasRendered = true;
+                  }
+                }
+                if (this.cachedFragment) {
+                  fragment = dom.cloneNode(this.cachedFragment, true);
+                }
+              } else {
+                fragment = this.build(dom);
+              }
+              if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+              var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+              block(env, morph0, context, "if", [get(env, context, "post.model.page")], {}, child0, child1);
+              return fragment;
+            }
+          };
+        }());
+        var child1 = (function() {
+          return {
+            isHTMLBars: true,
+            blockParams: 0,
+            cachedFragment: null,
+            hasRendered: false,
+            build: function build(dom) {
+              var el0 = dom.createDocumentFragment();
+              var el1 = dom.createTextNode("                                ");
+              dom.appendChild(el0, el1);
+              var el1 = dom.createElement("span");
+              dom.setAttribute(el1,"class","draft");
+              var el2 = dom.createTextNode("Draft");
+              dom.appendChild(el1, el2);
+              dom.appendChild(el0, el1);
+              var el1 = dom.createTextNode("\n");
+              dom.appendChild(el0, el1);
+              return el0;
+            },
+            render: function render(context, env, contextualElement) {
+              var dom = env.dom;
+              dom.detectNamespace(contextualElement);
+              var fragment;
+              if (env.useFragmentCache && dom.canClone) {
+                if (this.cachedFragment === null) {
+                  fragment = this.build(dom);
+                  if (this.hasRendered) {
+                    this.cachedFragment = fragment;
+                  } else {
+                    this.hasRendered = true;
+                  }
+                }
+                if (this.cachedFragment) {
+                  fragment = dom.cloneNode(this.cachedFragment, true);
+                }
+              } else {
+                fragment = this.build(dom);
+              }
+              return fragment;
+            }
+          };
+        }());
+        return {
+          isHTMLBars: true,
+          blockParams: 0,
+          cachedFragment: null,
+          hasRendered: false,
+          build: function build(dom) {
+            var el0 = dom.createDocumentFragment();
+            var el1 = dom.createTextNode("                    ");
+            dom.appendChild(el0, el1);
+            var el1 = dom.createElement("h3");
+            dom.setAttribute(el1,"class","entry-title");
+            dom.appendChild(el0, el1);
+            var el1 = dom.createTextNode("\n                    ");
+            dom.appendChild(el0, el1);
+            var el1 = dom.createElement("section");
+            dom.setAttribute(el1,"class","entry-meta");
+            var el2 = dom.createTextNode("\n                        ");
+            dom.appendChild(el1, el2);
+            var el2 = dom.createElement("span");
+            dom.setAttribute(el2,"class","avatar");
+            var el3 = dom.createTextNode("\n                            ");
+            dom.appendChild(el2, el3);
+            var el3 = dom.createElement("img");
+            dom.appendChild(el2, el3);
+            var el3 = dom.createTextNode("\n                        ");
+            dom.appendChild(el2, el3);
+            dom.appendChild(el1, el2);
+            var el2 = dom.createTextNode("\n                        ");
+            dom.appendChild(el1, el2);
+            var el2 = dom.createElement("span");
+            dom.setAttribute(el2,"class","author");
+            dom.appendChild(el1, el2);
+            var el2 = dom.createTextNode("\n                        ");
+            dom.appendChild(el1, el2);
+            var el2 = dom.createElement("span");
+            dom.setAttribute(el2,"class","status");
+            var el3 = dom.createTextNode("\n");
+            dom.appendChild(el2, el3);
+            var el3 = dom.createTextNode("                        ");
+            dom.appendChild(el2, el3);
+            dom.appendChild(el1, el2);
+            var el2 = dom.createTextNode("\n                    ");
+            dom.appendChild(el1, el2);
+            dom.appendChild(el0, el1);
+            var el1 = dom.createTextNode("\n");
+            dom.appendChild(el0, el1);
+            return el0;
+          },
+          render: function render(context, env, contextualElement) {
+            var dom = env.dom;
+            var hooks = env.hooks, content = hooks.content, get = hooks.get, element = hooks.element, block = hooks.block;
+            dom.detectNamespace(contextualElement);
+            var fragment;
+            if (env.useFragmentCache && dom.canClone) {
+              if (this.cachedFragment === null) {
+                fragment = this.build(dom);
+                if (this.hasRendered) {
+                  this.cachedFragment = fragment;
+                } else {
+                  this.hasRendered = true;
+                }
+              }
+              if (this.cachedFragment) {
+                fragment = dom.cloneNode(this.cachedFragment, true);
+              }
+            } else {
+              fragment = this.build(dom);
+            }
+            var element1 = dom.childAt(fragment, [3]);
+            var element2 = dom.childAt(element1, [1]);
+            var element3 = dom.childAt(element2, [1]);
+            var morph0 = dom.createMorphAt(dom.childAt(fragment, [1]),-1,-1);
+            var morph1 = dom.createMorphAt(dom.childAt(element1, [3]),-1,-1);
+            var morph2 = dom.createMorphAt(dom.childAt(element1, [5]),0,1);
+            content(env, morph0, context, "post.model.title");
+            element(env, element2, context, "bind-attr", [], {"style": get(env, context, "post.authorAvatarBackground")});
+            element(env, element3, context, "bind-attr", [], {"src": "post.authorAvatar", "title": "post.authorName"});
+            content(env, morph1, context, "post.authorName");
+            block(env, morph2, context, "if", [get(env, context, "post.isPublished")], {}, child0, child1);
+            return fragment;
+          }
+        };
+      }());
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, get = hooks.get, block = hooks.block;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+          var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+          block(env, morph0, context, "link-to", ["posts.post", get(env, context, "post")], {"class": "permalink", "alternateActive": get(env, context, "view.active"), "title": "Edit this post"}, child0, null);
+          return fragment;
+        }
+      };
+    }());
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("        ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("ol");
+        dom.setAttribute(el1,"class","posts-list");
+        var el2 = dom.createTextNode("\n");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("        ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, block = hooks.block;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(dom.childAt(fragment, [1]),0,1);
+        block(env, morph0, context, "each", [get(env, context, "controller")], {"itemController": "posts/post", "itemView": "post-item-view", "itemTagName": "li", "keyword": "post"}, child0, null);
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("header");
+      dom.setAttribute(el1,"class","page-header");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("button");
+      dom.setAttribute(el2,"class","menu-button js-menu-button");
+      var el3 = dom.createElement("span");
+      dom.setAttribute(el3,"class","sr-only");
+      var el4 = dom.createTextNode("Menu");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("h2");
+      dom.setAttribute(el2,"class","page-title");
+      var el3 = dom.createTextNode("Content");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("div");
+      dom.setAttribute(el1,"class","page-content");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("section");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("header");
+      dom.setAttribute(el3,"class","floatingheader");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("section");
+      dom.setAttribute(el4,"class","content-filter");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("small");
+      var el6 = dom.createTextNode("All Posts");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("section");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, element = hooks.element, block = hooks.block, content = hooks.content;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element4 = dom.childAt(fragment, [0, 1]);
+      var element5 = dom.childAt(fragment, [2]);
+      var element6 = dom.childAt(element5, [1]);
+      var element7 = dom.childAt(element5, [3]);
+      var morph0 = dom.createMorphAt(dom.childAt(element6, [1]),2,3);
+      var morph1 = dom.createMorphAt(element6,2,3);
+      var morph2 = dom.createMorphAt(element7,0,1);
+      element(env, element4, context, "action", ["toggleGlobalMobileNav"], {});
+      element(env, element6, context, "bind-attr", [], {"class": ":content-list :js-content-list postListFocused:keyboard-focused"});
+      block(env, morph0, context, "link-to", ["editor.new"], {"class": "btn btn-green", "title": "New Post"}, child0, null);
+      block(env, morph1, context, "view", ["paginated-scroll-box"], {"tagName": "section", "classNames": "content-list-content js-content-scrollbox"}, child1, null);
+      element(env, element7, context, "bind-attr", [], {"class": ":content-preview :js-content-preview postContentFocused:keyboard-focused"});
+      content(env, morph2, context, "outlet");
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/posts/index', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    var child0 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createElement("button");
+          dom.setAttribute(el0,"type","button");
+          dom.setAttribute(el0,"class","btn btn-green btn-lg");
+          dom.setAttribute(el0,"title","New Post");
+          var el1 = dom.createTextNode("Write a new Post");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          return fragment;
+        }
+      };
+    }());
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createElement("div");
+        dom.setAttribute(el1,"class","no-posts");
+        var el2 = dom.createTextNode("\n    ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("h3");
+        var el3 = dom.createTextNode("You Haven't Written Any Posts Yet!");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n    ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, block = hooks.block;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(dom.childAt(fragment, [0]),2,3);
+        block(env, morph0, context, "link-to", ["editor.new"], {}, child0, null);
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      block(env, morph0, context, "if", [get(env, context, "noPosts")], {}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/posts/post', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createTextNode("Back");
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  var child1 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createTextNode("Published");
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  var child2 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createTextNode("Written");
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  var child3 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, content = hooks.content;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        content(env, morph0, context, "model.author.name");
+        return fragment;
+      }
+    };
+  }());
+  var child4 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, content = hooks.content;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        content(env, morph0, context, "model.author.email");
+        return fragment;
+      }
+    };
+  }());
+  var child5 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createTextNode(" Edit");
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  var child6 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("div");
+        dom.setAttribute(el1,"class","wrapper");
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("h1");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n    ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, content = hooks.content, get = hooks.get, inline = hooks.inline;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element0 = dom.childAt(fragment, [1]);
+        var morph0 = dom.createMorphAt(dom.childAt(element0, [1]),-1,-1);
+        var morph1 = dom.createMorphAt(element0,2,3);
+        content(env, morph0, context, "model.title");
+        inline(env, morph1, context, "gh-format-html", [get(env, context, "model.html")], {});
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("header");
+      dom.setAttribute(el1,"class","post-preview-header clearfix");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("h2");
+      dom.setAttribute(el2,"class","page-title");
+      var el3 = dom.createTextNode("Preview");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("button");
+      dom.setAttribute(el2,"type","button");
+      dom.setAttribute(el2,"title","Feature this post");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("span");
+      dom.setAttribute(el3,"class","hidden");
+      var el4 = dom.createTextNode("Star");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("small");
+      dom.setAttribute(el2,"class","post-published-by");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("span");
+      dom.setAttribute(el3,"class","status");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("span");
+      dom.setAttribute(el3,"class","normal");
+      var el4 = dom.createTextNode("by");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("span");
+      dom.setAttribute(el3,"class","author");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("section");
+      dom.setAttribute(el2,"class","post-controls");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, block = hooks.block, element = hooks.element, get = hooks.get;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[2]); }
+      var element1 = dom.childAt(fragment, [0]);
+      var element2 = dom.childAt(element1, [4]);
+      var element3 = dom.childAt(element1, [6]);
+      var morph0 = dom.createMorphAt(element1,0,1);
+      var morph1 = dom.createMorphAt(dom.childAt(element3, [1]),-1,-1);
+      var morph2 = dom.createMorphAt(dom.childAt(element3, [5]),-1,-1);
+      var morph3 = dom.createMorphAt(dom.childAt(element1, [8]),0,1);
+      var morph4 = dom.createMorphAt(fragment,1,2,contextualElement);
+      block(env, morph0, context, "link-to", ["posts"], {"tagName": "button", "class": "btn btn-default btn-back"}, child0, null);
+      element(env, element2, context, "bind-attr", [], {"class": "model.featured:featured:unfeatured"});
+      element(env, element2, context, "action", ["toggleFeatured"], {});
+      block(env, morph1, context, "if", [get(env, context, "isPublished")], {}, child1, child2);
+      block(env, morph2, context, "if", [get(env, context, "model.author.name")], {}, child3, child4);
+      block(env, morph3, context, "link-to", ["editor.edit", get(env, context, "this")], {"class": "btn btn-default post-edit"}, child5, null);
+      block(env, morph4, context, "view", ["content-preview-content-view"], {"tagName": "section"}, child6, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/reset', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("section");
+      dom.setAttribute(el1,"class","reset-box js-reset-box fade-in");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("form");
+      dom.setAttribute(el2,"id","reset");
+      dom.setAttribute(el2,"class","reset-form");
+      dom.setAttribute(el2,"method","post");
+      dom.setAttribute(el2,"novalidate","novalidate");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("div");
+      dom.setAttribute(el3,"class","password-wrap");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("div");
+      dom.setAttribute(el3,"class","password-wrap");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("button");
+      dom.setAttribute(el3,"class","btn btn-blue");
+      dom.setAttribute(el3,"type","submit");
+      var el4 = dom.createTextNode("Reset Password");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, element = hooks.element, get = hooks.get, inline = hooks.inline;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element0 = dom.childAt(fragment, [0, 1]);
+      var element1 = dom.childAt(element0, [5]);
+      var morph0 = dom.createMorphAt(dom.childAt(element0, [1]),0,1);
+      var morph1 = dom.createMorphAt(dom.childAt(element0, [3]),0,1);
+      element(env, element0, context, "action", ["submit"], {"on": "submit"});
+      inline(env, morph0, context, "input", [], {"value": get(env, context, "newPassword"), "class": "password", "type": "password", "placeholder": "Password", "name": "newpassword", "autofocus": "autofocus"});
+      inline(env, morph1, context, "input", [], {"value": get(env, context, "ne2Password"), "class": "password", "type": "password", "placeholder": "Confirm Password", "name": "ne2password"});
+      element(env, element1, context, "bind-attr", [], {"disabled": "submitting"});
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/settings', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("                ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, inline = hooks.inline;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        inline(env, morph0, context, "gh-activating-list-item", [], {"route": "settings.general", "title": "General", "classNames": "settings-nav-general icon-settings"});
+        return fragment;
+      }
+    };
+  }());
+  var child1 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("                ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, inline = hooks.inline;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        inline(env, morph0, context, "gh-activating-list-item", [], {"route": "settings.users", "title": "Users", "classNames": "settings-nav-users icon-users"});
+        return fragment;
+      }
+    };
+  }());
+  var child2 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("                ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, inline = hooks.inline;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        inline(env, morph0, context, "gh-activating-list-item", [], {"route": "settings.tags", "title": "Tags", "classNames": "settings-nav-tags icon-tag"});
+        return fragment;
+      }
+    };
+  }());
+  var child3 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("                ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, inline = hooks.inline;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        inline(env, morph0, context, "gh-activating-list-item", [], {"route": "settings.navigation", "title": "Navigation", "classNames": "settings-nav-navigation icon-compass"});
+        return fragment;
+      }
+    };
+  }());
+  var child4 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("                ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, inline = hooks.inline;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        inline(env, morph0, context, "gh-activating-list-item", [], {"route": "settings.code-injection", "title": "Code Injection", "classNames": "settings-nav-code icon-code"});
+        return fragment;
+      }
+    };
+  }());
+  var child5 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("                ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, inline = hooks.inline;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        inline(env, morph0, context, "gh-activating-list-item", [], {"route": "settings.labs", "title": "Labs", "classNames": "settings-nav-labs icon-atom"});
+        return fragment;
+      }
+    };
+  }());
+  var child6 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("                ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, inline = hooks.inline;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        inline(env, morph0, context, "gh-activating-list-item", [], {"route": "settings.about", "title": "About", "classNames": "settings-nav-about icon-pacman"});
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("header");
+      dom.setAttribute(el1,"class","page-header");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("button");
+      dom.setAttribute(el2,"class","menu-button js-menu-button");
+      var el3 = dom.createElement("span");
+      dom.setAttribute(el3,"class","sr-only");
+      var el4 = dom.createTextNode("Menu");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("h2");
+      dom.setAttribute(el2,"class","page-title");
+      var el3 = dom.createTextNode("Settings");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("div");
+      dom.setAttribute(el1,"class","page-content");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("nav");
+      dom.setAttribute(el2,"class","settings-nav js-settings-menu");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("ul");
+      var el4 = dom.createTextNode("\n\n");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, element = hooks.element, get = hooks.get, block = hooks.block, content = hooks.content;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element0 = dom.childAt(fragment, [0, 1]);
+      var element1 = dom.childAt(fragment, [2]);
+      var element2 = dom.childAt(element1, [1, 1]);
+      var morph0 = dom.createMorphAt(element2,0,1);
+      var morph1 = dom.createMorphAt(element2,1,2);
+      var morph2 = dom.createMorphAt(element2,2,3);
+      var morph3 = dom.createMorphAt(element2,3,4);
+      var morph4 = dom.createMorphAt(element2,4,5);
+      var morph5 = dom.createMorphAt(element2,5,6);
+      var morph6 = dom.createMorphAt(element2,6,7);
+      var morph7 = dom.createMorphAt(element1,2,3);
+      element(env, element0, context, "action", ["toggleGlobalMobileNav"], {});
+      block(env, morph0, context, "if", [get(env, context, "showGeneral")], {}, child0, null);
+      block(env, morph1, context, "if", [get(env, context, "showUsers")], {}, child1, null);
+      block(env, morph2, context, "if", [get(env, context, "showTags")], {}, child2, null);
+      block(env, morph3, context, "if", [get(env, context, "showNavigation")], {}, child3, null);
+      block(env, morph4, context, "if", [get(env, context, "showCodeInjection")], {}, child4, null);
+      block(env, morph5, context, "if", [get(env, context, "showLabs")], {}, child5, null);
+      block(env, morph6, context, "if", [get(env, context, "showAbout")], {}, child6, null);
+      content(env, morph7, context, "outlet");
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/settings/about', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createTextNode("Back");
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  var child1 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, content = hooks.content;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        content(env, morph0, context, "model.mail");
+        return fragment;
+      }
+    };
+  }());
+  var child2 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createTextNode("Native");
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("header");
+      dom.setAttribute(el1,"class","settings-view-header");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("h2");
+      dom.setAttribute(el2,"class","page-title");
+      var el3 = dom.createTextNode("About");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("section");
+      dom.setAttribute(el1,"class","content settings-about");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("section");
+      dom.setAttribute(el2,"class","about-ghost-intro");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("h1");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("span");
+      dom.setAttribute(el4,"class","ghost_logo");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("span");
+      dom.setAttribute(el5,"class","hidden");
+      var el6 = dom.createTextNode("Ghost");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("span");
+      dom.setAttribute(el4,"class","version blue");
+      var el5 = dom.createTextNode("v");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("p");
+      var el4 = dom.createTextNode("A free, open, simple publishing platform");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("div");
+      dom.setAttribute(el3,"class","about-environment-help clearfix");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","about-environment");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("dl");
+      var el6 = dom.createTextNode("\n                    ");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createElement("dt");
+      var el7 = dom.createTextNode("Version:");
+      dom.appendChild(el6, el7);
+      dom.appendChild(el5, el6);
+      var el6 = dom.createTextNode("\n                    ");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createElement("dd");
+      dom.setAttribute(el6,"class","about-environment-detail");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createTextNode("\n                    ");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createElement("dt");
+      var el7 = dom.createTextNode("Environment:");
+      dom.appendChild(el6, el7);
+      dom.appendChild(el5, el6);
+      var el6 = dom.createTextNode("\n                    ");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createElement("dd");
+      dom.setAttribute(el6,"class","about-environment-detail");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createTextNode("\n                    ");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createElement("dt");
+      var el7 = dom.createTextNode("Database:");
+      dom.appendChild(el6, el7);
+      dom.appendChild(el5, el6);
+      var el6 = dom.createTextNode("\n                    ");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createElement("dd");
+      dom.setAttribute(el6,"class","about-environment-detail about-environment-database");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createTextNode("\n                    ");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createElement("dt");
+      var el7 = dom.createTextNode("Mail:");
+      dom.appendChild(el6, el7);
+      dom.appendChild(el5, el6);
+      var el6 = dom.createTextNode("\n                    ");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createElement("dd");
+      dom.setAttribute(el6,"class","about-environment-detail");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createTextNode("\n                ");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","about-help");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("a");
+      dom.setAttribute(el5,"href","http://support.ghost.org");
+      dom.setAttribute(el5,"class","btn");
+      var el6 = dom.createTextNode("User Documentation");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("a");
+      dom.setAttribute(el5,"href","https://ghost.org/forum/");
+      dom.setAttribute(el5,"class","btn");
+      var el6 = dom.createTextNode("Get Help With Ghost");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("section");
+      dom.setAttribute(el2,"class","about-credits");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("h1");
+      var el4 = dom.createTextNode("The People Who Made it Possible");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("ul");
+      dom.setAttribute(el3,"class","top-contributors clearfix");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("p");
+      dom.setAttribute(el3,"class","about-contributors-info");
+      var el4 = dom.createTextNode("Ghost is built by an incredible group of contributors from all over the world. Here are just a few of the people who helped create the version you’re using right now.");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("a");
+      dom.setAttribute(el3,"href","https://ghost.org/about/contribute/");
+      dom.setAttribute(el3,"class","about-get-involved btn-blue btn-lg btn");
+      var el4 = dom.createTextNode("Find out how you can get involved");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("p");
+      dom.setAttribute(el3,"class","about-copyright");
+      var el4 = dom.createTextNode("\n            Copyright 2013 - 2015 Ghost Foundation, released under the ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("a");
+      dom.setAttribute(el4,"href","https://github.com/TryGhost/Ghost/blob/master/LICENSE");
+      var el5 = dom.createTextNode("MIT license");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode(".\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("br");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("a");
+      dom.setAttribute(el4,"href","https://ghost.org/");
+      var el5 = dom.createTextNode("Ghost");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode(" is a trademark of the ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("a");
+      dom.setAttribute(el4,"href","https://ghost.org/about/");
+      var el5 = dom.createTextNode("Ghost Foundation");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode(".\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, block = hooks.block, content = hooks.content, get = hooks.get, inline = hooks.inline;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element0 = dom.childAt(fragment, [2]);
+      var element1 = dom.childAt(element0, [1]);
+      var element2 = dom.childAt(element1, [5, 1, 1]);
+      var morph0 = dom.createMorphAt(dom.childAt(fragment, [0]),0,1);
+      var morph1 = dom.createMorphAt(dom.childAt(element1, [1, 3]),0,-1);
+      var morph2 = dom.createMorphAt(dom.childAt(element2, [3]),-1,-1);
+      var morph3 = dom.createMorphAt(dom.childAt(element2, [7]),-1,-1);
+      var morph4 = dom.createMorphAt(dom.childAt(element2, [11]),-1,-1);
+      var morph5 = dom.createMorphAt(dom.childAt(element2, [15]),-1,-1);
+      var morph6 = dom.createMorphAt(dom.childAt(element0, [3, 3]),0,1);
+      block(env, morph0, context, "link-to", ["settings"], {"class": "btn btn-default btn-back"}, child0, null);
+      content(env, morph1, context, "model.version");
+      content(env, morph2, context, "model.version");
+      content(env, morph3, context, "model.environment");
+      content(env, morph4, context, "model.database");
+      block(env, morph5, context, "if", [get(env, context, "model.mail")], {}, child1, child2);
+      inline(env, morph6, context, "partial", ["contributors"], {});
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/settings/apps', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createTextNode("Back");
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  var child1 = (function() {
+    var child0 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode(" - ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, content = hooks.content;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,2]); }
+          var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+          var morph1 = dom.createMorphAt(fragment,1,2,contextualElement);
+          content(env, morph0, context, "appController.model.package.name");
+          content(env, morph1, context, "appController.model.package.version");
+          return fragment;
+        }
+      };
+    }());
+    var child1 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode(" - package.json missing :(");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, content = hooks.content;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          if (this.cachedFragment) { dom.repairClonedNode(fragment,[0]); }
+          var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+          content(env, morph0, context, "appController.model.name");
+          return fragment;
+        }
+      };
+    }());
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("        ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("tr");
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("td");
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n            ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("td");
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("button");
+        dom.setAttribute(el3,"type","button");
+        var el4 = dom.createTextNode("\n                    ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n                ");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n            ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, block = hooks.block, element = hooks.element, content = hooks.content;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element0 = dom.childAt(fragment, [1]);
+        var element1 = dom.childAt(element0, [3, 1]);
+        var morph0 = dom.createMorphAt(dom.childAt(element0, [1]),0,1);
+        var morph1 = dom.createMorphAt(element1,0,1);
+        block(env, morph0, context, "if", [get(env, context, "appController.model.package")], {}, child0, child1);
+        element(env, element1, context, "action", [get(env, context, "toggleApp"), get(env, context, "appController")], {});
+        element(env, element1, context, "bind-attr", [], {"class": ":btn :js-button-active activeClass:btn-red inactiveClass:btn-green activeClass:js-button-deactivate"});
+        content(env, morph1, context, "appController.buttonText");
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("header");
+      dom.setAttribute(el1,"class","settings-view-header");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("h2");
+      dom.setAttribute(el2,"class","title");
+      var el3 = dom.createTextNode("Apps");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("section");
+      dom.setAttribute(el1,"class","content settings-apps");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("table");
+      dom.setAttribute(el2,"class","js-apps");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("thead");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("th");
+      var el5 = dom.createTextNode("App name");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("th");
+      var el5 = dom.createTextNode("Status");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("tbody");
+      var el4 = dom.createTextNode("\n");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, block = hooks.block, get = hooks.get;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var morph0 = dom.createMorphAt(dom.childAt(fragment, [0]),0,1);
+      var morph1 = dom.createMorphAt(dom.childAt(fragment, [2, 1, 3]),0,1);
+      block(env, morph0, context, "link-to", ["settings"], {"class": "btn btn-default btn-back"}, child0, null);
+      block(env, morph1, context, "each", [get(env, context, "model")], {"itemController": "settings/app", "keyword": "appController"}, child1, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/settings/code-injection', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createTextNode("Back");
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("header");
+      dom.setAttribute(el1,"class","settings-view-header");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("h2");
+      dom.setAttribute(el2,"class","page-title");
+      var el3 = dom.createTextNode("Code Injection");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("section");
+      dom.setAttribute(el2,"class","page-actions");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("button");
+      dom.setAttribute(el3,"type","button");
+      dom.setAttribute(el3,"class","btn btn-blue");
+      var el4 = dom.createTextNode("Save");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("section");
+      dom.setAttribute(el1,"class","content settings-code");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("form");
+      dom.setAttribute(el2,"id","settings-code");
+      dom.setAttribute(el2,"novalidate","novalidate");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("fieldset");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("\n                    Ghost allows you to inject code into the top and bottom of your template files without editing them. This allows for quick modifications to insert useful things like tracking codes and meta data.\n                ");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","ghost-head");
+      var el6 = dom.createTextNode("Blog Header");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("Code here will be injected to the {{ghost_head}} helper at the top of your page");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","ghost-foot");
+      var el6 = dom.createTextNode("Blog Footer");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("Code here will be injected to the {{ghost_foot}} helper at the bottom of your page");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, block = hooks.block, element = hooks.element, get = hooks.get, inline = hooks.inline;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element0 = dom.childAt(fragment, [0]);
+      var element1 = dom.childAt(element0, [4, 1]);
+      var element2 = dom.childAt(fragment, [2, 1, 1]);
+      var morph0 = dom.createMorphAt(element0,0,1);
+      var morph1 = dom.createMorphAt(dom.childAt(element2, [3]),4,5);
+      var morph2 = dom.createMorphAt(dom.childAt(element2, [5]),4,5);
+      block(env, morph0, context, "link-to", ["settings"], {"class": "btn btn-default btn-back"}, child0, null);
+      element(env, element1, context, "action", ["save"], {});
+      inline(env, morph1, context, "textarea", [], {"id": "ghost-head", "name": "codeInjection[ghost_head]", "type": "text", "value": get(env, context, "model.ghost_head")});
+      inline(env, morph2, context, "textarea", [], {"id": "ghost-foot", "name": "codeInjection[ghost_foot]", "type": "text", "value": get(env, context, "model.ghost_foot")});
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/settings/general', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createTextNode("Back");
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  var child1 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("                ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("img");
+        dom.setAttribute(el1,"class","blog-logo");
+        dom.setAttribute(el1,"alt","logo");
+        dom.setAttribute(el1,"role","button");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, element = hooks.element;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element3 = dom.childAt(fragment, [1]);
+        element(env, element3, context, "bind-attr", [], {"src": get(env, context, "model.logo")});
+        element(env, element3, context, "action", ["openModal", "upload", get(env, context, "this"), "logo"], {});
+        return fragment;
+      }
+    };
+  }());
+  var child2 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("                ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("button");
+        dom.setAttribute(el1,"type","button");
+        dom.setAttribute(el1,"class","btn btn-green js-modal-logo");
+        var el2 = dom.createTextNode("Upload Image");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, element = hooks.element;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element2 = dom.childAt(fragment, [1]);
+        element(env, element2, context, "action", ["openModal", "upload", get(env, context, "this"), "logo"], {});
+        return fragment;
+      }
+    };
+  }());
+  var child3 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("                ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("img");
+        dom.setAttribute(el1,"class","blog-cover");
+        dom.setAttribute(el1,"alt","cover photo");
+        dom.setAttribute(el1,"role","button");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, element = hooks.element;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element1 = dom.childAt(fragment, [1]);
+        element(env, element1, context, "bind-attr", [], {"src": get(env, context, "model.cover")});
+        element(env, element1, context, "action", ["openModal", "upload", get(env, context, "this"), "cover"], {});
+        return fragment;
+      }
+    };
+  }());
+  var child4 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("                ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("button");
+        dom.setAttribute(el1,"type","button");
+        dom.setAttribute(el1,"class","btn btn-green js-modal-cover");
+        var el2 = dom.createTextNode("Upload Image");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, element = hooks.element;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element0 = dom.childAt(fragment, [1]);
+        element(env, element0, context, "action", ["openModal", "upload", get(env, context, "this"), "cover"], {});
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("header");
+      dom.setAttribute(el1,"class","settings-view-header");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("h2");
+      dom.setAttribute(el2,"class","page-title");
+      var el3 = dom.createTextNode("General");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("section");
+      dom.setAttribute(el2,"class","page-actions");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("button");
+      dom.setAttribute(el3,"type","button");
+      dom.setAttribute(el3,"class","btn btn-blue");
+      var el4 = dom.createTextNode("Save");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("section");
+      dom.setAttribute(el1,"class","content settings-general");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("form");
+      dom.setAttribute(el2,"id","settings-general");
+      dom.setAttribute(el2,"novalidate","novalidate");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("fieldset");
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","blog-title");
+      var el6 = dom.createTextNode("Blog Title");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("The name of your blog");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group description-container");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","blog-description");
+      var el6 = dom.createTextNode("Blog Description");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("\n                    Describe what your blog is about\n                    ");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createTextNode("\n                ");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("div");
+      dom.setAttribute(el3,"class","form-group");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("label");
+      var el5 = dom.createTextNode("Blog Logo");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("p");
+      var el5 = dom.createTextNode("Display a sexy logo for your publication");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("div");
+      dom.setAttribute(el3,"class","form-group");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("label");
+      var el5 = dom.createTextNode("Blog Cover");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("p");
+      var el5 = dom.createTextNode("Display a cover image on your site");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("fieldset");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","email-address");
+      var el6 = dom.createTextNode("Email Address");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("Address to use for admin notifications");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","postsPerPage");
+      var el6 = dom.createTextNode("Posts per page");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("How many posts should be displayed on each page");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group for-checkbox");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","permalinks");
+      var el6 = dom.createTextNode("Dated Permalinks");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"class","checkbox");
+      dom.setAttribute(el5,"for","permalinks");
+      var el6 = dom.createTextNode("\n                    ");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createTextNode("\n                    ");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createElement("span");
+      dom.setAttribute(el6,"class","input-toggle-component");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createTextNode("\n                    ");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createElement("p");
+      var el7 = dom.createTextNode("Include the date in your post URLs");
+      dom.appendChild(el6, el7);
+      dom.appendChild(el5, el6);
+      var el6 = dom.createTextNode("\n                ");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group for-select");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","activeTheme");
+      var el6 = dom.createTextNode("Theme");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("span");
+      dom.setAttribute(el5,"class","gh-select");
+      dom.setAttribute(el5,"tabindex","0");
+      var el6 = dom.createTextNode("\n                   ");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createTextNode("\n               ");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("Select a theme for your blog");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, block = hooks.block, element = hooks.element, get = hooks.get, inline = hooks.inline;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element4 = dom.childAt(fragment, [0]);
+      var element5 = dom.childAt(element4, [4, 1]);
+      var element6 = dom.childAt(fragment, [2, 1]);
+      var element7 = dom.childAt(element6, [1]);
+      var element8 = dom.childAt(element7, [3]);
+      var element9 = dom.childAt(element6, [7]);
+      var element10 = dom.childAt(element9, [7, 3]);
+      var morph0 = dom.createMorphAt(element4,0,1);
+      var morph1 = dom.createMorphAt(dom.childAt(element7, [1]),2,3);
+      var morph2 = dom.createMorphAt(element8,2,3);
+      var morph3 = dom.createMorphAt(dom.childAt(element8, [4]),0,1);
+      var morph4 = dom.createMorphAt(dom.childAt(element6, [3]),2,3);
+      var morph5 = dom.createMorphAt(dom.childAt(element6, [5]),2,3);
+      var morph6 = dom.createMorphAt(dom.childAt(element9, [1]),2,3);
+      var morph7 = dom.createMorphAt(dom.childAt(element9, [3]),2,3);
+      var morph8 = dom.createMorphAt(dom.childAt(element9, [5, 3]),0,1);
+      var morph9 = dom.createMorphAt(element10,0,1);
+      block(env, morph0, context, "link-to", ["settings"], {"class": "btn btn-default btn-back"}, child0, null);
+      element(env, element5, context, "action", ["save"], {});
+      inline(env, morph1, context, "input", [], {"id": "blog-title", "name": "general[title]", "type": "text", "value": get(env, context, "model.title")});
+      inline(env, morph2, context, "textarea", [], {"id": "blog-description", "name": "general[description]", "value": get(env, context, "model.description")});
+      inline(env, morph3, context, "gh-count-characters", [get(env, context, "model.description")], {});
+      block(env, morph4, context, "if", [get(env, context, "model.logo")], {}, child1, child2);
+      block(env, morph5, context, "if", [get(env, context, "model.cover")], {}, child3, child4);
+      inline(env, morph6, context, "input", [], {"id": "email-address", "name": "general[email-address]", "type": "email", "value": get(env, context, "model.email"), "autocapitalize": "off", "autocorrect": "off"});
+      inline(env, morph7, context, "input", [], {"id": "postsPerPage", "name": "general[postsPerPage]", "focus-out": "checkPostsPerPage", "value": get(env, context, "model.postsPerPage"), "min": "1", "max": "1000", "type": "number", "pattern": "[0-9]*"});
+      inline(env, morph8, context, "input", [], {"id": "permalinks", "name": "general[permalinks]", "type": "checkbox", "checked": get(env, context, "isDatedPermalinks")});
+      element(env, element10, context, "bind-attr", [], {"data-select-text": get(env, context, "selectedTheme.label")});
+      inline(env, morph9, context, "view", ["select"], {"id": "activeTheme", "name": "general[activeTheme]", "content": get(env, context, "themes"), "optionValuePath": "content.name", "optionLabelPath": "content.label", "value": get(env, context, "model.activeTheme"), "selection": get(env, context, "selectedTheme")});
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/settings/labs', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createTextNode("Back");
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  var child1 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("        ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("fieldset");
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("div");
+        dom.setAttribute(el2,"class","form-group");
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("label");
+        var el4 = dom.createTextNode("Import");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("p");
+        var el4 = dom.createTextNode("Import from another Ghost installation. If you import a user, this will replace the current user & log you out.");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n            ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, inline = hooks.inline, get = hooks.get;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element0 = dom.childAt(fragment, [1, 1]);
+        var morph0 = dom.createMorphAt(element0,2,3);
+        var morph1 = dom.createMorphAt(element0,3,4);
+        inline(env, morph0, context, "partial", ["import-errors"], {});
+        inline(env, morph1, context, "gh-file-upload", [], {"id": "importfile", "uploadButtonText": get(env, context, "uploadButtonText")});
+        return fragment;
+      }
+    };
+  }());
+  var child2 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("            ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("div");
+        dom.setAttribute(el1,"class","form-group for-checkbox");
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("label");
+        dom.setAttribute(el2,"for","labs-codeInjectionUI");
+        var el3 = dom.createTextNode("Code Injection");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("label");
+        dom.setAttribute(el2,"class","check box");
+        dom.setAttribute(el2,"for","labs-codeInjectionUI");
+        var el3 = dom.createTextNode("\n                    ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n                    ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("span");
+        dom.setAttribute(el3,"class","input-toggle-component");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n                    ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("p");
+        var el4 = dom.createTextNode("Enable the code injection interface");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("p");
+        var el3 = dom.createTextNode("A settings screen which enables you to add code into your theme (work in progress)");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, inline = hooks.inline;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(dom.childAt(fragment, [1, 3]),0,1);
+        inline(env, morph0, context, "input", [], {"id": "labs-codeInjectionUI", "name": "labs[codeInjectionUI]", "type": "checkbox", "checked": get(env, context, "useCodeInjectionUI")});
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("header");
+      dom.setAttribute(el1,"class","settings-view-header");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("h2");
+      dom.setAttribute(el2,"class","page-title");
+      var el3 = dom.createTextNode("Labs");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("section");
+      dom.setAttribute(el1,"class","content settings-debug");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("form");
+      dom.setAttribute(el2,"id","settings-export");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("fieldset");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      var el6 = dom.createTextNode("Export");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("button");
+      dom.setAttribute(el5,"type","button");
+      dom.setAttribute(el5,"class","btn btn-blue");
+      var el6 = dom.createTextNode("Export");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("Export the blog settings and data.");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("form");
+      dom.setAttribute(el2,"id","settings-resetdb");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("fieldset");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      var el6 = dom.createTextNode("Delete all Content");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("button");
+      dom.setAttribute(el5,"type","button");
+      dom.setAttribute(el5,"class","btn btn-red js-delete");
+      var el6 = dom.createTextNode("Delete");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("Delete all posts and tags from the database.");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("form");
+      dom.setAttribute(el2,"id","settings-testmail");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("fieldset");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      var el6 = dom.createTextNode("Send a test email");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("button");
+      dom.setAttribute(el5,"type","button");
+      dom.setAttribute(el5,"id","sendtestmail");
+      dom.setAttribute(el5,"class","btn btn-blue");
+      var el6 = dom.createTextNode("Send");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("Sends a test email to your address.");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("hr");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("form");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("fieldset");
+      var el4 = dom.createTextNode("\n");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, block = hooks.block, element = hooks.element, get = hooks.get;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element1 = dom.childAt(fragment, [2]);
+      var element2 = dom.childAt(element1, [1, 1, 1, 3]);
+      var element3 = dom.childAt(element1, [4, 1, 1, 3]);
+      var element4 = dom.childAt(element1, [6, 1, 1, 3]);
+      var morph0 = dom.createMorphAt(dom.childAt(fragment, [0]),0,1);
+      var morph1 = dom.createMorphAt(element1,2,3);
+      var morph2 = dom.createMorphAt(dom.childAt(element1, [10, 1]),0,1);
+      block(env, morph0, context, "link-to", ["settings"], {"class": "btn btn-default btn-back"}, child0, null);
+      element(env, element2, context, "action", ["exportData"], {});
+      block(env, morph1, context, "gh-form", [], {"id": "settings-import", "enctype": "multipart/form-data"}, child1, null);
+      element(env, element3, context, "action", ["openModal", "deleteAll"], {});
+      element(env, element4, context, "action", ["sendTestEmail"], {});
+      block(env, morph2, context, "unless", [get(env, context, "codeUIFlag")], {}, child2, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/settings/navigation', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createTextNode("Back");
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  var child1 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("            ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, inline = hooks.inline;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        inline(env, morph0, context, "gh-navitem", [], {"navItem": get(env, context, "navItem"), "baseUrl": get(env, context, "blogUrl"), "addItem": "addItem", "deleteItem": "deleteItem", "updateUrl": "updateUrl"});
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("header");
+      dom.setAttribute(el1,"class","settings-view-header");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("h2");
+      dom.setAttribute(el2,"class","page-title");
+      var el3 = dom.createTextNode("Navigation");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("section");
+      dom.setAttribute(el2,"class","page-actions");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("button");
+      dom.setAttribute(el3,"type","button");
+      dom.setAttribute(el3,"class","btn btn-blue");
+      var el4 = dom.createTextNode("Save");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("section");
+      dom.setAttribute(el1,"class","content settings-navigation");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("form");
+      dom.setAttribute(el2,"id","settings-navigation");
+      dom.setAttribute(el2,"class","js-settings-navigation");
+      dom.setAttribute(el2,"novalidate","novalidate");
+      var el3 = dom.createTextNode("\n");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, block = hooks.block, element = hooks.element, get = hooks.get;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element0 = dom.childAt(fragment, [0]);
+      var element1 = dom.childAt(element0, [4, 1]);
+      var morph0 = dom.createMorphAt(element0,0,1);
+      var morph1 = dom.createMorphAt(dom.childAt(fragment, [2, 1]),0,1);
+      block(env, morph0, context, "link-to", ["settings"], {"class": "btn btn-default btn-back"}, child0, null);
+      element(env, element1, context, "action", ["save"], {});
+      block(env, morph1, context, "each", [get(env, context, "navigationItems")], {"keyword": "navItem"}, child1, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/settings/tags', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createTextNode("Back");
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  var child1 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("        ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("div");
+        dom.setAttribute(el1,"class","settings-tag");
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("button");
+        dom.setAttribute(el2,"class","tag-edit-button");
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("span");
+        dom.setAttribute(el3,"class","tag-title");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("span");
+        dom.setAttribute(el3,"class","label label-default");
+        var el4 = dom.createTextNode("/");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("p");
+        dom.setAttribute(el3,"class","tag-description");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n                ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("span");
+        dom.setAttribute(el3,"class","tags-count");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n            ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, element = hooks.element, content = hooks.content;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element0 = dom.childAt(fragment, [1, 1]);
+        var morph0 = dom.createMorphAt(dom.childAt(element0, [1]),-1,-1);
+        var morph1 = dom.createMorphAt(dom.childAt(element0, [3]),0,-1);
+        var morph2 = dom.createMorphAt(dom.childAt(element0, [5]),-1,-1);
+        var morph3 = dom.createMorphAt(dom.childAt(element0, [7]),-1,-1);
+        element(env, element0, context, "action", ["editTag", get(env, context, "tag")], {});
+        content(env, morph0, context, "tag.name");
+        content(env, morph1, context, "tag.slug");
+        content(env, morph2, context, "tag.description");
+        content(env, morph3, context, "tag.post_count");
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("header");
+      dom.setAttribute(el1,"class","settings-view-header");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("h2");
+      dom.setAttribute(el2,"class","page-title");
+      var el3 = dom.createTextNode("Tags");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("section");
+      dom.setAttribute(el2,"class","page-actions");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("button");
+      dom.setAttribute(el3,"type","button");
+      dom.setAttribute(el3,"class","btn btn-green");
+      var el4 = dom.createTextNode("New Tag");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("section");
+      dom.setAttribute(el1,"class","content settings-tags");
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, block = hooks.block, element = hooks.element, get = hooks.get;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element1 = dom.childAt(fragment, [0]);
+      var element2 = dom.childAt(element1, [4, 1]);
+      var morph0 = dom.createMorphAt(element1,0,1);
+      var morph1 = dom.createMorphAt(dom.childAt(fragment, [2]),0,-1);
+      block(env, morph0, context, "link-to", ["settings"], {"class": "btn btn-default btn-back"}, child0, null);
+      element(env, element2, context, "action", ["newTag"], {});
+      block(env, morph1, context, "each", [get(env, context, "tags")], {"keyword": "tag"}, child1, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/settings/tags/settings-menu', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    var child0 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("                        ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("button");
+          dom.setAttribute(el1,"type","button");
+          var el2 = dom.createTextNode("\n                            ");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createElement("b");
+          var el3 = dom.createTextNode("Meta Data");
+          dom.appendChild(el2, el3);
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode("\n                            ");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createElement("span");
+          var el3 = dom.createTextNode("Extra content for SEO and social media.");
+          dom.appendChild(el2, el3);
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode("\n                        ");
+          dom.appendChild(el1, el2);
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          return fragment;
+        }
+      };
+    }());
+    var child1 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("                    ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("button");
+          dom.setAttribute(el1,"type","button");
+          dom.setAttribute(el1,"class","btn btn-link btn-sm tag-delete-button icon-trash");
+          var el2 = dom.createTextNode("Delete Tag");
+          dom.appendChild(el1, el2);
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, get = hooks.get, element = hooks.element;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          var element5 = dom.childAt(fragment, [1]);
+          element(env, element5, context, "action", ["openModal", "delete-tag", get(env, context, "activeTag")], {});
+          return fragment;
+        }
+      };
+    }());
+    var child2 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("            ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("div");
+          dom.setAttribute(el1,"class","settings-menu-header subview");
+          var el2 = dom.createTextNode("\n                ");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createElement("button");
+          dom.setAttribute(el2,"class","back icon-chevron-left settings-menu-header-action");
+          var el3 = dom.createElement("span");
+          dom.setAttribute(el3,"class","hidden");
+          var el4 = dom.createTextNode("Back");
+          dom.appendChild(el3, el4);
+          dom.appendChild(el2, el3);
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode("\n                ");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createElement("h4");
+          var el3 = dom.createTextNode("Meta Data");
+          dom.appendChild(el2, el3);
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode("\n            ");
+          dom.appendChild(el1, el2);
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n\n            ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("div");
+          dom.setAttribute(el1,"class","settings-menu-content");
+          var el2 = dom.createTextNode("\n                ");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createElement("form");
+          var el3 = dom.createTextNode("\n                ");
+          dom.appendChild(el2, el3);
+          var el3 = dom.createElement("div");
+          dom.setAttribute(el3,"class","form-group");
+          var el4 = dom.createTextNode("\n                    ");
+          dom.appendChild(el3, el4);
+          var el4 = dom.createElement("label");
+          dom.setAttribute(el4,"for","meta-title");
+          var el5 = dom.createTextNode("Meta Title");
+          dom.appendChild(el4, el5);
+          dom.appendChild(el3, el4);
+          var el4 = dom.createTextNode("\n                    ");
+          dom.appendChild(el3, el4);
+          var el4 = dom.createTextNode("\n                    ");
+          dom.appendChild(el3, el4);
+          var el4 = dom.createElement("p");
+          var el5 = dom.createTextNode("Recommended: ");
+          dom.appendChild(el4, el5);
+          var el5 = dom.createElement("b");
+          var el6 = dom.createTextNode("70");
+          dom.appendChild(el5, el6);
+          dom.appendChild(el4, el5);
+          var el5 = dom.createTextNode(" characters. You’ve used ");
+          dom.appendChild(el4, el5);
+          dom.appendChild(el3, el4);
+          var el4 = dom.createTextNode("\n                ");
+          dom.appendChild(el3, el4);
+          dom.appendChild(el2, el3);
+          var el3 = dom.createTextNode("\n\n                ");
+          dom.appendChild(el2, el3);
+          var el3 = dom.createElement("div");
+          dom.setAttribute(el3,"class","form-group");
+          var el4 = dom.createTextNode("\n                    ");
+          dom.appendChild(el3, el4);
+          var el4 = dom.createElement("label");
+          dom.setAttribute(el4,"for","meta-description");
+          var el5 = dom.createTextNode("Meta Description");
+          dom.appendChild(el4, el5);
+          dom.appendChild(el3, el4);
+          var el4 = dom.createTextNode("\n                    ");
+          dom.appendChild(el3, el4);
+          var el4 = dom.createTextNode("\n                    ");
+          dom.appendChild(el3, el4);
+          var el4 = dom.createElement("p");
+          var el5 = dom.createTextNode("Recommended: ");
+          dom.appendChild(el4, el5);
+          var el5 = dom.createElement("b");
+          var el6 = dom.createTextNode("156");
+          dom.appendChild(el5, el6);
+          dom.appendChild(el4, el5);
+          var el5 = dom.createTextNode(" characters. You’ve used ");
+          dom.appendChild(el4, el5);
+          dom.appendChild(el3, el4);
+          var el4 = dom.createTextNode("\n                ");
+          dom.appendChild(el3, el4);
+          dom.appendChild(el2, el3);
+          var el3 = dom.createTextNode("\n\n                ");
+          dom.appendChild(el2, el3);
+          var el3 = dom.createElement("div");
+          dom.setAttribute(el3,"class","form-group");
+          var el4 = dom.createTextNode("\n                    ");
+          dom.appendChild(el3, el4);
+          var el4 = dom.createElement("label");
+          var el5 = dom.createTextNode("Search Engine Result Preview");
+          dom.appendChild(el4, el5);
+          dom.appendChild(el3, el4);
+          var el4 = dom.createTextNode("\n                    ");
+          dom.appendChild(el3, el4);
+          var el4 = dom.createElement("div");
+          dom.setAttribute(el4,"class","seo-preview");
+          var el5 = dom.createTextNode("\n                        ");
+          dom.appendChild(el4, el5);
+          var el5 = dom.createElement("div");
+          dom.setAttribute(el5,"class","seo-preview-title");
+          dom.appendChild(el4, el5);
+          var el5 = dom.createTextNode("\n                        ");
+          dom.appendChild(el4, el5);
+          var el5 = dom.createElement("div");
+          dom.setAttribute(el5,"class","seo-preview-link");
+          dom.appendChild(el4, el5);
+          var el5 = dom.createTextNode("\n                        ");
+          dom.appendChild(el4, el5);
+          var el5 = dom.createElement("div");
+          dom.setAttribute(el5,"class","seo-preview-description");
+          dom.appendChild(el4, el5);
+          var el5 = dom.createTextNode("\n                    ");
+          dom.appendChild(el4, el5);
+          dom.appendChild(el3, el4);
+          var el4 = dom.createTextNode("\n                ");
+          dom.appendChild(el3, el4);
+          dom.appendChild(el2, el3);
+          var el3 = dom.createTextNode("\n                ");
+          dom.appendChild(el2, el3);
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode("\n            ");
+          dom.appendChild(el1, el2);
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, element = hooks.element, get = hooks.get, inline = hooks.inline, content = hooks.content;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          var element0 = dom.childAt(fragment, [1, 1]);
+          var element1 = dom.childAt(fragment, [3, 1]);
+          var element2 = dom.childAt(element1, [1]);
+          var element3 = dom.childAt(element1, [3]);
+          var element4 = dom.childAt(element1, [5, 3]);
+          var morph0 = dom.createMorphAt(element2,2,3);
+          var morph1 = dom.createMorphAt(dom.childAt(element2, [4]),2,-1);
+          var morph2 = dom.createMorphAt(element3,2,3);
+          var morph3 = dom.createMorphAt(dom.childAt(element3, [4]),2,-1);
+          var morph4 = dom.createMorphAt(dom.childAt(element4, [1]),-1,-1);
+          var morph5 = dom.createMorphAt(dom.childAt(element4, [3]),-1,-1);
+          var morph6 = dom.createMorphAt(dom.childAt(element4, [5]),-1,-1);
+          element(env, element0, context, "action", ["closeSubview"], {});
+          inline(env, morph0, context, "gh-input", [], {"type": "text", "value": get(env, context, "activeTagMetaTitleScratch"), "focus-out": "saveActiveTagMetaTitle"});
+          inline(env, morph1, context, "gh-count-down-characters", [get(env, context, "activeTagMetaTitleScratch"), 70], {});
+          inline(env, morph2, context, "gh-textarea", [], {"value": get(env, context, "activeTagMetaDescriptionScratch"), "focus-out": "saveActiveTagMetaDescription"});
+          inline(env, morph3, context, "gh-count-down-characters", [get(env, context, "activeTagMetaDescriptionScratch"), 156], {});
+          content(env, morph4, context, "seoTitle");
+          content(env, morph5, context, "seoURL");
+          content(env, morph6, context, "seoDescription");
+          return fragment;
+        }
+      };
+    }());
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("div");
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("div");
+        dom.setAttribute(el2,"class","settings-menu-header");
+        var el3 = dom.createTextNode("\n            ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("h4");
+        var el4 = dom.createTextNode("Tag Settings");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n            ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("button");
+        dom.setAttribute(el3,"class","close icon-x settings-menu-header-action");
+        var el4 = dom.createTextNode("\n                ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("span");
+        dom.setAttribute(el4,"class","hidden");
+        var el5 = dom.createTextNode("Close");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n            ");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n        ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("div");
+        dom.setAttribute(el2,"class","settings-menu-content");
+        var el3 = dom.createTextNode("\n            ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n            ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("form");
+        var el4 = dom.createTextNode("\n                ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("div");
+        dom.setAttribute(el4,"class","form-group");
+        var el5 = dom.createTextNode("\n                    ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("label");
+        var el6 = dom.createTextNode("Name");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                    ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n\n                ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("div");
+        dom.setAttribute(el4,"class","form-group");
+        var el5 = dom.createTextNode("\n                    ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("label");
+        var el6 = dom.createTextNode("URL");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                    ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                    ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n\n                ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("div");
+        dom.setAttribute(el4,"class","form-group");
+        var el5 = dom.createTextNode("\n                    ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createElement("label");
+        var el6 = dom.createTextNode("Description");
+        dom.appendChild(el5, el6);
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                    ");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("\n                ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n\n                ");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createElement("ul");
+        dom.setAttribute(el4,"class","nav-list nav-list-block");
+        var el5 = dom.createTextNode("\n");
+        dom.appendChild(el4, el5);
+        var el5 = dom.createTextNode("                ");
+        dom.appendChild(el4, el5);
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("\n\n");
+        dom.appendChild(el3, el4);
+        var el4 = dom.createTextNode("            ");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n        ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n    ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n\n    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("div");
+        var el2 = dom.createTextNode("\n");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("    ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, element = hooks.element, get = hooks.get, inline = hooks.inline, block = hooks.block;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element6 = dom.childAt(fragment, [1]);
+        var element7 = dom.childAt(element6, [1, 3]);
+        var element8 = dom.childAt(element6, [3]);
+        var element9 = dom.childAt(element8, [2]);
+        var element10 = dom.childAt(element9, [3]);
+        var element11 = dom.childAt(fragment, [3]);
+        var morph0 = dom.createMorphAt(element8,0,1);
+        var morph1 = dom.createMorphAt(dom.childAt(element9, [1]),2,3);
+        var morph2 = dom.createMorphAt(element10,2,3);
+        var morph3 = dom.createMorphAt(element10,3,4);
+        var morph4 = dom.createMorphAt(dom.childAt(element9, [5]),2,3);
+        var morph5 = dom.createMorphAt(dom.childAt(element9, [7]),0,1);
+        var morph6 = dom.createMorphAt(element9,8,9);
+        var morph7 = dom.createMorphAt(element11,0,1);
+        element(env, element6, context, "bind-attr", [], {"class": "isViewingSubview:settings-menu-pane-out-left:settings-menu-pane-in :settings-menu :settings-menu-pane"});
+        element(env, element7, context, "action", ["closeSettingsMenu"], {});
+        inline(env, morph0, context, "gh-uploader", [], {"uploaded": "setCoverImage", "canceled": "clearCoverImage", "description": "Add tag image", "image": get(env, context, "activeTag.image"), "uploaderReference": get(env, context, "uploaderReference"), "tagName": "section"});
+        inline(env, morph1, context, "gh-input", [], {"type": "text", "value": get(env, context, "activeTagNameScratch"), "focus-out": "saveActiveTagName"});
+        inline(env, morph2, context, "gh-input", [], {"type": "text", "value": get(env, context, "activeTagSlugScratch"), "focus-out": "saveActiveTagSlug"});
+        inline(env, morph3, context, "gh-url-preview", [], {"prefix": "tag", "slug": get(env, context, "activeTagSlugScratch"), "tagName": "p", "classNames": "description"});
+        inline(env, morph4, context, "gh-textarea", [], {"value": get(env, context, "activeTagDescriptionScratch"), "focus-out": "saveActiveTagDescription"});
+        block(env, morph5, context, "gh-tab", [], {"tagName": "li", "classNames": "nav-list-item"}, child0, null);
+        block(env, morph6, context, "unless", [get(env, context, "activeTag.isNew")], {}, child1, null);
+        element(env, element11, context, "bind-attr", [], {"class": "isViewingSubview:settings-menu-pane-in:settings-menu-pane-out-right :settings-menu :settings-menu-pane"});
+        block(env, morph7, context, "gh-tab-pane", [], {}, child2, null);
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("div");
+      dom.setAttribute(el1,"class","content-cover");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, element = hooks.element, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[2]); }
+      var element12 = dom.childAt(fragment, [0]);
+      var morph0 = dom.createMorphAt(fragment,1,2,contextualElement);
+      element(env, element12, context, "action", ["closeSettingsMenu"], {});
+      block(env, morph0, context, "gh-tabs-manager", [], {"selected": "showSubview", "class": "settings-menu-container"}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/settings/users', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, content = hooks.content;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      content(env, morph0, context, "outlet");
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/settings/users/index', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    var child0 = (function() {
+      var child0 = (function() {
+        return {
+          isHTMLBars: true,
+          blockParams: 0,
+          cachedFragment: null,
+          hasRendered: false,
+          build: function build(dom) {
+            var el0 = dom.createTextNode("Back");
+            return el0;
+          },
+          render: function render(context, env, contextualElement) {
+            var dom = env.dom;
+            dom.detectNamespace(contextualElement);
+            var fragment;
+            if (env.useFragmentCache && dom.canClone) {
+              if (this.cachedFragment === null) {
+                fragment = this.build(dom);
+                if (this.hasRendered) {
+                  this.cachedFragment = fragment;
+                } else {
+                  this.hasRendered = true;
+                }
+              }
+              if (this.cachedFragment) {
+                fragment = dom.cloneNode(this.cachedFragment, true);
+              }
+            } else {
+              fragment = this.build(dom);
+            }
+            return fragment;
+          }
+        };
+      }());
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("            ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, block = hooks.block;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+          block(env, morph0, context, "link-to", ["content"], {"class": "btn btn-default btn-back"}, child0, null);
+          return fragment;
+        }
+      };
+    }());
+    var child1 = (function() {
+      var child0 = (function() {
+        return {
+          isHTMLBars: true,
+          blockParams: 0,
+          cachedFragment: null,
+          hasRendered: false,
+          build: function build(dom) {
+            var el0 = dom.createTextNode("Back");
+            return el0;
+          },
+          render: function render(context, env, contextualElement) {
+            var dom = env.dom;
+            dom.detectNamespace(contextualElement);
+            var fragment;
+            if (env.useFragmentCache && dom.canClone) {
+              if (this.cachedFragment === null) {
+                fragment = this.build(dom);
+                if (this.hasRendered) {
+                  this.cachedFragment = fragment;
+                } else {
+                  this.hasRendered = true;
+                }
+              }
+              if (this.cachedFragment) {
+                fragment = dom.cloneNode(this.cachedFragment, true);
+              }
+            } else {
+              fragment = this.build(dom);
+            }
+            return fragment;
+          }
+        };
+      }());
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("            ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, block = hooks.block;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+          block(env, morph0, context, "link-to", ["settings"], {"class": "btn btn-default btn-back"}, child0, null);
+          return fragment;
+        }
+      };
+    }());
+    var child2 = (function() {
+      var child0 = (function() {
+        var child0 = (function() {
+          return {
+            isHTMLBars: true,
+            blockParams: 0,
+            cachedFragment: null,
+            hasRendered: false,
+            build: function build(dom) {
+              var el0 = dom.createDocumentFragment();
+              var el1 = dom.createTextNode("                                ");
+              dom.appendChild(el0, el1);
+              var el1 = dom.createElement("span");
+              dom.setAttribute(el1,"class","red");
+              var el2 = dom.createTextNode("Invitation not sent - please try again");
+              dom.appendChild(el1, el2);
+              dom.appendChild(el0, el1);
+              var el1 = dom.createTextNode("\n");
+              dom.appendChild(el0, el1);
+              return el0;
+            },
+            render: function render(context, env, contextualElement) {
+              var dom = env.dom;
+              dom.detectNamespace(contextualElement);
+              var fragment;
+              if (env.useFragmentCache && dom.canClone) {
+                if (this.cachedFragment === null) {
+                  fragment = this.build(dom);
+                  if (this.hasRendered) {
+                    this.cachedFragment = fragment;
+                  } else {
+                    this.hasRendered = true;
+                  }
+                }
+                if (this.cachedFragment) {
+                  fragment = dom.cloneNode(this.cachedFragment, true);
+                }
+              } else {
+                fragment = this.build(dom);
+              }
+              return fragment;
+            }
+          };
+        }());
+        var child1 = (function() {
+          return {
+            isHTMLBars: true,
+            blockParams: 0,
+            cachedFragment: null,
+            hasRendered: false,
+            build: function build(dom) {
+              var el0 = dom.createDocumentFragment();
+              var el1 = dom.createTextNode("                                ");
+              dom.appendChild(el0, el1);
+              var el1 = dom.createElement("span");
+              dom.setAttribute(el1,"class","description");
+              var el2 = dom.createTextNode("Invitation sent: ");
+              dom.appendChild(el1, el2);
+              dom.appendChild(el0, el1);
+              var el1 = dom.createTextNode("\n");
+              dom.appendChild(el0, el1);
+              return el0;
+            },
+            render: function render(context, env, contextualElement) {
+              var dom = env.dom;
+              var hooks = env.hooks, content = hooks.content;
+              dom.detectNamespace(contextualElement);
+              var fragment;
+              if (env.useFragmentCache && dom.canClone) {
+                if (this.cachedFragment === null) {
+                  fragment = this.build(dom);
+                  if (this.hasRendered) {
+                    this.cachedFragment = fragment;
+                  } else {
+                    this.hasRendered = true;
+                  }
+                }
+                if (this.cachedFragment) {
+                  fragment = dom.cloneNode(this.cachedFragment, true);
+                }
+              } else {
+                fragment = this.build(dom);
+              }
+              var morph0 = dom.createMorphAt(dom.childAt(fragment, [1]),0,-1);
+              content(env, morph0, context, "user.model.created_at");
+              return fragment;
+            }
+          };
+        }());
+        return {
+          isHTMLBars: true,
+          blockParams: 0,
+          cachedFragment: null,
+          hasRendered: false,
+          build: function build(dom) {
+            var el0 = dom.createDocumentFragment();
+            var el1 = dom.createTextNode("                ");
+            dom.appendChild(el0, el1);
+            var el1 = dom.createElement("div");
+            dom.setAttribute(el1,"class","user-list-item");
+            var el2 = dom.createTextNode("\n                    ");
+            dom.appendChild(el1, el2);
+            var el2 = dom.createElement("span");
+            dom.setAttribute(el2,"class","user-list-item-icon icon-mail");
+            var el3 = dom.createTextNode("ic");
+            dom.appendChild(el2, el3);
+            dom.appendChild(el1, el2);
+            var el2 = dom.createTextNode("\n\n                    ");
+            dom.appendChild(el1, el2);
+            var el2 = dom.createElement("div");
+            dom.setAttribute(el2,"class","user-list-item-body");
+            var el3 = dom.createTextNode("\n                        ");
+            dom.appendChild(el2, el3);
+            var el3 = dom.createElement("span");
+            dom.setAttribute(el3,"class","name");
+            dom.appendChild(el2, el3);
+            var el3 = dom.createElement("br");
+            dom.appendChild(el2, el3);
+            var el3 = dom.createTextNode("\n");
+            dom.appendChild(el2, el3);
+            var el3 = dom.createTextNode("                    ");
+            dom.appendChild(el2, el3);
+            dom.appendChild(el1, el2);
+            var el2 = dom.createTextNode("\n                    ");
+            dom.appendChild(el1, el2);
+            var el2 = dom.createElement("aside");
+            dom.setAttribute(el2,"class","user-list-item-aside");
+            var el3 = dom.createTextNode("\n                        ");
+            dom.appendChild(el2, el3);
+            var el3 = dom.createElement("a");
+            dom.setAttribute(el3,"class","user-list-action");
+            dom.setAttribute(el3,"href","#");
+            var el4 = dom.createTextNode("Revoke");
+            dom.appendChild(el3, el4);
+            dom.appendChild(el2, el3);
+            var el3 = dom.createTextNode("\n                        ");
+            dom.appendChild(el2, el3);
+            var el3 = dom.createElement("a");
+            dom.setAttribute(el3,"class","user-list-action");
+            dom.setAttribute(el3,"href","#");
+            var el4 = dom.createTextNode("Resend");
+            dom.appendChild(el3, el4);
+            dom.appendChild(el2, el3);
+            var el3 = dom.createTextNode("\n                    ");
+            dom.appendChild(el2, el3);
+            dom.appendChild(el1, el2);
+            var el2 = dom.createTextNode("\n                ");
+            dom.appendChild(el1, el2);
+            dom.appendChild(el0, el1);
+            var el1 = dom.createTextNode("\n");
+            dom.appendChild(el0, el1);
+            return el0;
+          },
+          render: function render(context, env, contextualElement) {
+            var dom = env.dom;
+            var hooks = env.hooks, content = hooks.content, get = hooks.get, block = hooks.block, element = hooks.element;
+            dom.detectNamespace(contextualElement);
+            var fragment;
+            if (env.useFragmentCache && dom.canClone) {
+              if (this.cachedFragment === null) {
+                fragment = this.build(dom);
+                if (this.hasRendered) {
+                  this.cachedFragment = fragment;
+                } else {
+                  this.hasRendered = true;
+                }
+              }
+              if (this.cachedFragment) {
+                fragment = dom.cloneNode(this.cachedFragment, true);
+              }
+            } else {
+              fragment = this.build(dom);
+            }
+            var element3 = dom.childAt(fragment, [1]);
+            var element4 = dom.childAt(element3, [3]);
+            var element5 = dom.childAt(element3, [5]);
+            var element6 = dom.childAt(element5, [1]);
+            var element7 = dom.childAt(element5, [3]);
+            var morph0 = dom.createMorphAt(dom.childAt(element4, [1]),-1,-1);
+            var morph1 = dom.createMorphAt(element4,3,4);
+            content(env, morph0, context, "user.email");
+            block(env, morph1, context, "if", [get(env, context, "user.model.pending")], {}, child0, child1);
+            element(env, element6, context, "action", ["revoke"], {});
+            element(env, element7, context, "action", ["resend"], {});
+            return fragment;
+          }
+        };
+      }());
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("\n        ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("section");
+          dom.setAttribute(el1,"class","user-list invited-users");
+          var el2 = dom.createTextNode("\n\n            ");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createElement("h4");
+          dom.setAttribute(el2,"class","user-list-title");
+          var el3 = dom.createTextNode("Invited users");
+          dom.appendChild(el2, el3);
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode("\n\n");
+          dom.appendChild(el1, el2);
+          var el2 = dom.createTextNode("\n        ");
+          dom.appendChild(el1, el2);
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n\n");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, get = hooks.get, block = hooks.block;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          var morph0 = dom.createMorphAt(dom.childAt(fragment, [1]),2,3);
+          block(env, morph0, context, "each", [get(env, context, "invitedUsers")], {"itemController": "settings/users/user", "keyword": "user"}, child0, null);
+          return fragment;
+        }
+      };
+    }());
+    var child3 = (function() {
+      var child0 = (function() {
+        var child0 = (function() {
+          var child0 = (function() {
+            return {
+              isHTMLBars: true,
+              blockParams: 0,
+              cachedFragment: null,
+              hasRendered: false,
+              build: function build(dom) {
+                var el0 = dom.createDocumentFragment();
+                var el1 = dom.createTextNode("                            ");
+                dom.appendChild(el0, el1);
+                var el1 = dom.createElement("span");
+                dom.appendChild(el0, el1);
+                var el1 = dom.createTextNode("\n");
+                dom.appendChild(el0, el1);
+                return el0;
+              },
+              render: function render(context, env, contextualElement) {
+                var dom = env.dom;
+                var hooks = env.hooks, get = hooks.get, subexpr = hooks.subexpr, concat = hooks.concat, attribute = hooks.attribute, content = hooks.content;
+                dom.detectNamespace(contextualElement);
+                var fragment;
+                if (env.useFragmentCache && dom.canClone) {
+                  if (this.cachedFragment === null) {
+                    fragment = this.build(dom);
+                    if (this.hasRendered) {
+                      this.cachedFragment = fragment;
+                    } else {
+                      this.hasRendered = true;
+                    }
+                  }
+                  if (this.cachedFragment) {
+                    fragment = dom.cloneNode(this.cachedFragment, true);
+                  }
+                } else {
+                  fragment = this.build(dom);
+                }
+                var element0 = dom.childAt(fragment, [1]);
+                var morph0 = dom.createMorphAt(element0,-1,-1);
+                var attrMorph0 = dom.createAttrMorph(element0, 'class');
+                attribute(env, attrMorph0, element0, "class", concat(env, ["role-label ", subexpr(env, context, "unbound", [get(env, context, "role.lowerCaseName")], {})]));
+                content(env, morph0, context, "role.name");
+                return fragment;
+              }
+            };
+          }());
+          return {
+            isHTMLBars: true,
+            blockParams: 0,
+            cachedFragment: null,
+            hasRendered: false,
+            build: function build(dom) {
+              var el0 = dom.createDocumentFragment();
+              var el1 = dom.createTextNode("");
+              dom.appendChild(el0, el1);
+              var el1 = dom.createTextNode("");
+              dom.appendChild(el0, el1);
+              return el0;
+            },
+            render: function render(context, env, contextualElement) {
+              var dom = env.dom;
+              var hooks = env.hooks, get = hooks.get, block = hooks.block;
+              dom.detectNamespace(contextualElement);
+              var fragment;
+              if (env.useFragmentCache && dom.canClone) {
+                if (this.cachedFragment === null) {
+                  fragment = this.build(dom);
+                  if (this.hasRendered) {
+                    this.cachedFragment = fragment;
+                  } else {
+                    this.hasRendered = true;
+                  }
+                }
+                if (this.cachedFragment) {
+                  fragment = dom.cloneNode(this.cachedFragment, true);
+                }
+              } else {
+                fragment = this.build(dom);
+              }
+              if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+              var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+              block(env, morph0, context, "each", [get(env, context, "user.model.roles")], {"keyword": "role"}, child0, null);
+              return fragment;
+            }
+          };
+        }());
+        return {
+          isHTMLBars: true,
+          blockParams: 0,
+          cachedFragment: null,
+          hasRendered: false,
+          build: function build(dom) {
+            var el0 = dom.createDocumentFragment();
+            var el1 = dom.createTextNode("                ");
+            dom.appendChild(el0, el1);
+            var el1 = dom.createElement("span");
+            dom.setAttribute(el1,"class","user-list-item-figure");
+            var el2 = dom.createTextNode("\n                    ");
+            dom.appendChild(el1, el2);
+            var el2 = dom.createElement("span");
+            dom.setAttribute(el2,"class","hidden");
+            var el3 = dom.createTextNode("Photo of ");
+            dom.appendChild(el2, el3);
+            dom.appendChild(el1, el2);
+            var el2 = dom.createTextNode("\n                ");
+            dom.appendChild(el1, el2);
+            dom.appendChild(el0, el1);
+            var el1 = dom.createTextNode("\n\n                ");
+            dom.appendChild(el0, el1);
+            var el1 = dom.createElement("div");
+            dom.setAttribute(el1,"class","user-list-item-body");
+            var el2 = dom.createTextNode("\n                    ");
+            dom.appendChild(el1, el2);
+            var el2 = dom.createElement("span");
+            dom.setAttribute(el2,"class","name");
+            var el3 = dom.createTextNode("\n                        ");
+            dom.appendChild(el2, el3);
+            var el3 = dom.createTextNode("\n                    ");
+            dom.appendChild(el2, el3);
+            dom.appendChild(el1, el2);
+            var el2 = dom.createTextNode("\n                    ");
+            dom.appendChild(el1, el2);
+            var el2 = dom.createElement("br");
+            dom.appendChild(el1, el2);
+            var el2 = dom.createTextNode("\n                    ");
+            dom.appendChild(el1, el2);
+            var el2 = dom.createElement("span");
+            dom.setAttribute(el2,"class","description");
+            var el3 = dom.createTextNode("Last seen: ");
+            dom.appendChild(el2, el3);
+            dom.appendChild(el1, el2);
+            var el2 = dom.createTextNode("\n                ");
+            dom.appendChild(el1, el2);
+            dom.appendChild(el0, el1);
+            var el1 = dom.createTextNode("\n                ");
+            dom.appendChild(el0, el1);
+            var el1 = dom.createElement("aside");
+            dom.setAttribute(el1,"class","user-list-item-aside");
+            var el2 = dom.createTextNode("\n");
+            dom.appendChild(el1, el2);
+            var el2 = dom.createTextNode("                ");
+            dom.appendChild(el1, el2);
+            dom.appendChild(el0, el1);
+            var el1 = dom.createTextNode("\n");
+            dom.appendChild(el0, el1);
+            return el0;
+          },
+          render: function render(context, env, contextualElement) {
+            var dom = env.dom;
+            var hooks = env.hooks, get = hooks.get, element = hooks.element, inline = hooks.inline, content = hooks.content, block = hooks.block;
+            dom.detectNamespace(contextualElement);
+            var fragment;
+            if (env.useFragmentCache && dom.canClone) {
+              if (this.cachedFragment === null) {
+                fragment = this.build(dom);
+                if (this.hasRendered) {
+                  this.cachedFragment = fragment;
+                } else {
+                  this.hasRendered = true;
+                }
+              }
+              if (this.cachedFragment) {
+                fragment = dom.cloneNode(this.cachedFragment, true);
+              }
+            } else {
+              fragment = this.build(dom);
+            }
+            var element1 = dom.childAt(fragment, [1]);
+            var element2 = dom.childAt(fragment, [3]);
+            var morph0 = dom.createMorphAt(dom.childAt(element1, [1]),0,-1);
+            var morph1 = dom.createMorphAt(dom.childAt(element2, [1]),0,1);
+            var morph2 = dom.createMorphAt(dom.childAt(element2, [5]),0,-1);
+            var morph3 = dom.createMorphAt(dom.childAt(fragment, [5]),0,1);
+            element(env, element1, context, "bind-attr", [], {"style": get(env, context, "user.image")});
+            inline(env, morph0, context, "unbound", [get(env, context, "user.model.name")], {});
+            content(env, morph1, context, "user.model.name");
+            inline(env, morph2, context, "unbound", [get(env, context, "user.last_login")], {});
+            block(env, morph3, context, "unless", [get(env, context, "user.model.isAuthor")], {}, child0, null);
+            return fragment;
+          }
+        };
+      }());
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, get = hooks.get, block = hooks.block;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+          var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+          block(env, morph0, context, "link-to", ["settings.users.user", get(env, context, "user")], {"class": "user-list-item"}, child0, null);
+          return fragment;
+        }
+      };
+    }());
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("header");
+        dom.setAttribute(el1,"class","settings-view-header user-list-header");
+        var el2 = dom.createTextNode("\n");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("h2");
+        dom.setAttribute(el2,"class","page-title");
+        var el3 = dom.createTextNode("Users");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n        ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("section");
+        dom.setAttribute(el2,"class","page-actions");
+        var el3 = dom.createTextNode("\n            ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("button");
+        dom.setAttribute(el3,"class","btn btn-green");
+        var el4 = dom.createTextNode("New User");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n        ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n    ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n\n    ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("section");
+        dom.setAttribute(el1,"class","content settings-users");
+        var el2 = dom.createTextNode("\n\n");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n    ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("section");
+        dom.setAttribute(el2,"class","user-list active-users");
+        var el3 = dom.createTextNode("\n\n        ");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createElement("h4");
+        dom.setAttribute(el3,"class","user-list-title");
+        var el4 = dom.createTextNode("Active users");
+        dom.appendChild(el3, el4);
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n\n");
+        dom.appendChild(el2, el3);
+        var el3 = dom.createTextNode("\n    ");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n\n    ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, block = hooks.block, element = hooks.element;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element8 = dom.childAt(fragment, [1]);
+        var element9 = dom.childAt(element8, [4, 1]);
+        var element10 = dom.childAt(fragment, [3]);
+        var morph0 = dom.createMorphAt(element8,0,1);
+        var morph1 = dom.createMorphAt(element10,0,1);
+        var morph2 = dom.createMorphAt(dom.childAt(element10, [2]),2,3);
+        block(env, morph0, context, "if", [get(env, context, "session.user.isEditor")], {}, child0, child1);
+        element(env, element9, context, "action", ["openModal", "invite-new-user"], {});
+        block(env, morph1, context, "if", [get(env, context, "invitedUsers")], {}, child2, null);
+        block(env, morph2, context, "each", [get(env, context, "activeUsers")], {"itemController": "settings/users/user", "keyword": "user"}, child3, null);
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      if (this.cachedFragment) { dom.repairClonedNode(fragment,[0,1]); }
+      var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+      block(env, morph0, context, "view", ["settings/users/users-list-view"], {"class": "users-list-wrapper js-users-list-view"}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/settings/users/user', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    var child0 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createElement("i");
+          dom.setAttribute(el1,"class","icon-chevron-left");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("Users");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          return fragment;
+        }
+      };
+    }());
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("        ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, block = hooks.block;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+        block(env, morph0, context, "link-to", ["settings.users"], {"class": "btn btn-default btn-back", "tagName": "button"}, child0, null);
+        return fragment;
+      }
+    };
+  }());
+  var child1 = (function() {
+    var child0 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("                    ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("i");
+          dom.setAttribute(el1,"class","icon-settings");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n                    ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createElement("span");
+          dom.setAttribute(el1,"class","hidden");
+          var el2 = dom.createTextNode("User Settings");
+          dom.appendChild(el1, el2);
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          return fragment;
+        }
+      };
+    }());
+    var child1 = (function() {
+      return {
+        isHTMLBars: true,
+        blockParams: 0,
+        cachedFragment: null,
+        hasRendered: false,
+        build: function build(dom) {
+          var el0 = dom.createDocumentFragment();
+          var el1 = dom.createTextNode("                    ");
+          dom.appendChild(el0, el1);
+          var el1 = dom.createTextNode("\n");
+          dom.appendChild(el0, el1);
+          return el0;
+        },
+        render: function render(context, env, contextualElement) {
+          var dom = env.dom;
+          var hooks = env.hooks, inline = hooks.inline;
+          dom.detectNamespace(contextualElement);
+          var fragment;
+          if (env.useFragmentCache && dom.canClone) {
+            if (this.cachedFragment === null) {
+              fragment = this.build(dom);
+              if (this.hasRendered) {
+                this.cachedFragment = fragment;
+              } else {
+                this.hasRendered = true;
+              }
+            }
+            if (this.cachedFragment) {
+              fragment = dom.cloneNode(this.cachedFragment, true);
+            }
+          } else {
+            fragment = this.build(dom);
+          }
+          var morph0 = dom.createMorphAt(fragment,0,1,contextualElement);
+          inline(env, morph0, context, "partial", ["user-actions-menu"], {});
+          return fragment;
+        }
+      };
+    }());
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("            ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("span");
+        dom.setAttribute(el1,"class","dropdown");
+        var el2 = dom.createTextNode("\n");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("            ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, block = hooks.block;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var element0 = dom.childAt(fragment, [1]);
+        if (this.cachedFragment) { dom.repairClonedNode(element0,[1]); }
+        var morph0 = dom.createMorphAt(element0,0,1);
+        var morph1 = dom.createMorphAt(element0,1,2);
+        block(env, morph0, context, "gh-dropdown-button", [], {"dropdownName": "user-actions-menu", "classNames": "btn btn-default only-has-icon user-actions-cog", "title": "User Actions"}, child0, null);
+        block(env, morph1, context, "gh-dropdown", [], {"name": "user-actions-menu", "tagName": "ul", "classNames": "user-actions-menu dropdown-menu dropdown-triangle-top-right"}, child1, null);
+        return fragment;
+      }
+    };
+  }());
+  var child2 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("            ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("div");
+        dom.setAttribute(el1,"class","form-group");
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("label");
+        dom.setAttribute(el2,"for","user-role");
+        var el3 = dom.createTextNode("Role");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("p");
+        var el3 = dom.createTextNode("What permissions should this user have?");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, inline = hooks.inline;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(dom.childAt(fragment, [1]),2,3);
+        inline(env, morph0, context, "gh-role-selector", [], {"initialValue": get(env, context, "user.role"), "onChange": "changeRole", "selectId": "user-role"});
+        return fragment;
+      }
+    };
+  }());
+  var child3 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createTextNode("            ");
+        dom.appendChild(el0, el1);
+        var el1 = dom.createElement("div");
+        dom.setAttribute(el1,"class","form-group");
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createElement("label");
+        dom.setAttribute(el2,"for","user-password-old");
+        var el3 = dom.createTextNode("Old Password");
+        dom.appendChild(el2, el3);
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n                ");
+        dom.appendChild(el1, el2);
+        var el2 = dom.createTextNode("\n            ");
+        dom.appendChild(el1, el2);
+        dom.appendChild(el0, el1);
+        var el1 = dom.createTextNode("\n");
+        dom.appendChild(el0, el1);
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        var hooks = env.hooks, get = hooks.get, inline = hooks.inline;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        var morph0 = dom.createMorphAt(dom.childAt(fragment, [1]),2,3);
+        inline(env, morph0, context, "input", [], {"value": get(env, context, "user.password"), "type": "password", "id": "user-password-old"});
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("header");
+      dom.setAttribute(el1,"class","settings-subview-header clearfix");
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("h2");
+      dom.setAttribute(el2,"class","page-title");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("section");
+      dom.setAttribute(el2,"class","page-actions");
+      var el3 = dom.createTextNode("\n");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("button");
+      dom.setAttribute(el3,"class","btn btn-blue");
+      var el4 = dom.createTextNode("Save");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n\n");
+      dom.appendChild(el0, el1);
+      var el1 = dom.createElement("div");
+      dom.setAttribute(el1,"class","content settings-user");
+      var el2 = dom.createTextNode("\n\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("figure");
+      dom.setAttribute(el2,"class","user-cover");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("button");
+      dom.setAttribute(el3,"class","btn btn-default user-cover-edit js-modal-cover");
+      var el4 = dom.createTextNode("Change Cover");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("form");
+      dom.setAttribute(el2,"class","user-profile");
+      dom.setAttribute(el2,"novalidate","novalidate");
+      dom.setAttribute(el2,"autocomplete","off");
+      var el3 = dom.createTextNode("\n\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("input");
+      dom.setAttribute(el3,"style","display:none;");
+      dom.setAttribute(el3,"type","text");
+      dom.setAttribute(el3,"name","fakeusernameremembered");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("input");
+      dom.setAttribute(el3,"style","display:none;");
+      dom.setAttribute(el3,"type","password");
+      dom.setAttribute(el3,"name","fakepasswordremembered");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("fieldset");
+      dom.setAttribute(el3,"class","user-details-top");
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("figure");
+      dom.setAttribute(el4,"class","user-image");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("div");
+      dom.setAttribute(el5,"id","user-image");
+      dom.setAttribute(el5,"class","img");
+      dom.setAttribute(el5,"href","#");
+      var el6 = dom.createElement("span");
+      dom.setAttribute(el6,"class","hidden");
+      var el7 = dom.createTextNode("\"s Picture");
+      dom.appendChild(el6, el7);
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("button");
+      dom.setAttribute(el5,"type","button");
+      dom.setAttribute(el5,"class","edit-user-image js-modal-image");
+      var el6 = dom.createTextNode("Edit Picture");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group first-form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","user-name");
+      var el6 = dom.createTextNode("Full Name");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("Use your real name so people can recognise you");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("fieldset");
+      dom.setAttribute(el3,"class","user-details-bottom");
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","user-slug");
+      var el6 = dom.createTextNode("Slug");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("/author/");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","user-email");
+      var el6 = dom.createTextNode("Email");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("Used for notifications");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","user-location");
+      var el6 = dom.createTextNode("Location");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("Where in the world do you live?");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","user-website");
+      var el6 = dom.createTextNode("Website");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("Have a website or blog other than this one? Link it!");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group bio-container");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","user-bio");
+      var el6 = dom.createTextNode("Bio");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("\n                    Write about you, in 200 characters or less.\n                    ");
+      dom.appendChild(el5, el6);
+      var el6 = dom.createTextNode("\n                ");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("hr");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("fieldset");
+      var el4 = dom.createTextNode("\n");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","user-password-new");
+      var el6 = dom.createTextNode("New Password");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","user-new-password-verification");
+      var el6 = dom.createTextNode("Verify Password");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("button");
+      dom.setAttribute(el5,"type","button");
+      dom.setAttribute(el5,"class","btn btn-red button-change-password");
+      var el6 = dom.createTextNode("Change Password");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, block = hooks.block, content = hooks.content, element = hooks.element, inline = hooks.inline;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element1 = dom.childAt(fragment, [0]);
+      var element2 = dom.childAt(element1, [4]);
+      var element3 = dom.childAt(element2, [2]);
+      var element4 = dom.childAt(fragment, [2]);
+      var element5 = dom.childAt(element4, [1]);
+      var element6 = dom.childAt(element5, [1]);
+      var element7 = dom.childAt(element4, [3]);
+      var element8 = dom.childAt(element7, [5]);
+      var element9 = dom.childAt(element8, [1]);
+      var element10 = dom.childAt(element9, [1]);
+      var element11 = dom.childAt(element9, [3]);
+      var element12 = dom.childAt(element7, [7]);
+      var element13 = dom.childAt(element12, [1]);
+      var element14 = dom.childAt(element13, [4]);
+      var element15 = dom.childAt(element12, [10]);
+      var element16 = dom.childAt(element7, [9]);
+      var element17 = dom.childAt(element16, [6, 1]);
+      var morph0 = dom.createMorphAt(element1,0,1);
+      var morph1 = dom.createMorphAt(dom.childAt(element1, [2]),-1,-1);
+      var morph2 = dom.createMorphAt(element2,0,1);
+      var morph3 = dom.createMorphAt(dom.childAt(element10, [0]),-1,0);
+      var morph4 = dom.createMorphAt(dom.childAt(element8, [3]),2,3);
+      var morph5 = dom.createMorphAt(element13,2,3);
+      var morph6 = dom.createMorphAt(element14,-1,0);
+      var morph7 = dom.createMorphAt(element14,0,-1);
+      var morph8 = dom.createMorphAt(dom.childAt(element12, [3]),2,3);
+      var morph9 = dom.createMorphAt(element12,4,5);
+      var morph10 = dom.createMorphAt(dom.childAt(element12, [6]),2,3);
+      var morph11 = dom.createMorphAt(dom.childAt(element12, [8]),2,3);
+      var morph12 = dom.createMorphAt(element15,2,3);
+      var morph13 = dom.createMorphAt(dom.childAt(element15, [4]),0,1);
+      var morph14 = dom.createMorphAt(element16,0,1);
+      var morph15 = dom.createMorphAt(dom.childAt(element16, [2]),2,3);
+      var morph16 = dom.createMorphAt(dom.childAt(element16, [4]),2,3);
+      block(env, morph0, context, "unless", [get(env, context, "session.user.isAuthor")], {}, child0, null);
+      content(env, morph1, context, "user.name");
+      block(env, morph2, context, "if", [get(env, context, "view.userActionsAreVisible")], {}, child1, null);
+      element(env, element3, context, "action", ["save"], {});
+      element(env, element5, context, "bind-attr", [], {"style": get(env, context, "cover")});
+      element(env, element6, context, "action", ["openModal", "upload", get(env, context, "user"), "cover"], {});
+      element(env, element10, context, "bind-attr", [], {"style": get(env, context, "image")});
+      content(env, morph3, context, "user.name");
+      element(env, element11, context, "action", ["openModal", "upload", get(env, context, "user"), "image"], {});
+      inline(env, morph4, context, "input", [], {"value": get(env, context, "user.name"), "id": "user-name", "class": "user-name", "placeholder": "Full Name", "autocorrect": "off"});
+      inline(env, morph5, context, "gh-input", [], {"class": "user-name", "id": "user-slug", "value": get(env, context, "slugValue"), "name": "user", "focus-out": "updateSlug", "placeholder": "Slug", "selectOnClick": "true", "autocorrect": "off"});
+      content(env, morph6, context, "gh-blog-url");
+      content(env, morph7, context, "slugValue");
+      inline(env, morph8, context, "input", [], {"type": "email", "value": get(env, context, "user.email"), "id": "user-email", "placeholder": "Email Address", "autocapitalize": "off", "autocorrect": "off", "autocomplete": "off"});
+      block(env, morph9, context, "if", [get(env, context, "view.rolesDropdownIsVisible")], {}, child2, null);
+      inline(env, morph10, context, "input", [], {"type": "text", "value": get(env, context, "user.location"), "id": "user-location"});
+      inline(env, morph11, context, "input", [], {"type": "url", "value": get(env, context, "user.website"), "id": "user-website", "autocapitalize": "off", "autocorrect": "off", "autocomplete": "off"});
+      inline(env, morph12, context, "textarea", [], {"id": "user-bio", "value": get(env, context, "user.bio")});
+      inline(env, morph13, context, "gh-count-characters", [get(env, context, "user.bio")], {});
+      block(env, morph14, context, "unless", [get(env, context, "view.isNotOwnProfile")], {}, child3, null);
+      inline(env, morph15, context, "input", [], {"value": get(env, context, "user.newPassword"), "type": "password", "id": "user-password-new"});
+      inline(env, morph16, context, "input", [], {"value": get(env, context, "user.ne2Password"), "type": "password", "id": "user-new-password-verification"});
+      element(env, element17, context, "action", ["password"], {});
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/setup', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("section");
+      dom.setAttribute(el1,"class","setup-box js-setup-box fade-in");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("div");
+      dom.setAttribute(el2,"class","vertical");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("form");
+      dom.setAttribute(el3,"id","setup");
+      dom.setAttribute(el3,"class","setup-form");
+      dom.setAttribute(el3,"method","post");
+      dom.setAttribute(el3,"novalidate","novalidate");
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("input");
+      dom.setAttribute(el4,"style","display:none;");
+      dom.setAttribute(el4,"type","text");
+      dom.setAttribute(el4,"name","fakeusernameremembered");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("input");
+      dom.setAttribute(el4,"style","display:none;");
+      dom.setAttribute(el4,"type","password");
+      dom.setAttribute(el4,"name","fakepasswordremembered");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("header");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("h1");
+      var el6 = dom.createTextNode("Welcome to your new Ghost blog");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("h2");
+      var el6 = dom.createTextNode("Let's get a few things set up so you can get started.");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","blog-title");
+      var el6 = dom.createTextNode("Blog Title");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("What would you like to call your blog?");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","name");
+      var el6 = dom.createTextNode("Full Name");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("The name that you will sign your posts with");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","email");
+      var el6 = dom.createTextNode("Email Address");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("Used for important notifications");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","password");
+      var el6 = dom.createTextNode("Password");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("Must be at least 8 characters");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("footer");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("button");
+      dom.setAttribute(el5,"type","submit");
+      dom.setAttribute(el5,"class","btn btn-green btn-lg");
+      var el6 = dom.createTextNode("Ok, Let's Do This");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, inline = hooks.inline, element = hooks.element;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element0 = dom.childAt(fragment, [0, 1, 1]);
+      var element1 = dom.childAt(element0, [15, 1]);
+      var morph0 = dom.createMorphAt(dom.childAt(element0, [7]),2,3);
+      var morph1 = dom.createMorphAt(dom.childAt(element0, [9]),2,3);
+      var morph2 = dom.createMorphAt(dom.childAt(element0, [11]),2,3);
+      var morph3 = dom.createMorphAt(dom.childAt(element0, [13]),2,3);
+      inline(env, morph0, context, "input", [], {"type": "text", "name": "blog-title", "autofocus": "autofocus", "autocorrect": "off", "value": get(env, context, "blogTitle")});
+      inline(env, morph1, context, "input", [], {"type": "text", "name": "name", "autofocus": "autofocus", "autocorrect": "off", "value": get(env, context, "name")});
+      inline(env, morph2, context, "input", [], {"type": "email", "name": "email", "autofocus": "autofocus", "autocorrect": "off", "value": get(env, context, "email")});
+      inline(env, morph3, context, "input", [], {"type": "password", "name": "password", "autofocus": "autofocus", "autocorrect": "off", "value": get(env, context, "password")});
+      element(env, element1, context, "action", ["setup"], {});
+      element(env, element1, context, "bind-attr", [], {"disabled": get(env, context, "submitting")});
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/signin', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  var child0 = (function() {
+    return {
+      isHTMLBars: true,
+      blockParams: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      build: function build(dom) {
+        var el0 = dom.createTextNode("Forgotten password?");
+        return el0;
+      },
+      render: function render(context, env, contextualElement) {
+        var dom = env.dom;
+        dom.detectNamespace(contextualElement);
+        var fragment;
+        if (env.useFragmentCache && dom.canClone) {
+          if (this.cachedFragment === null) {
+            fragment = this.build(dom);
+            if (this.hasRendered) {
+              this.cachedFragment = fragment;
+            } else {
+              this.hasRendered = true;
+            }
+          }
+          if (this.cachedFragment) {
+            fragment = dom.cloneNode(this.cachedFragment, true);
+          }
+        } else {
+          fragment = this.build(dom);
+        }
+        return fragment;
+      }
+    };
+  }());
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("section");
+      dom.setAttribute(el1,"class","login-box js-login-box fade-in");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("form");
+      dom.setAttribute(el2,"id","login");
+      dom.setAttribute(el2,"class","login-form");
+      dom.setAttribute(el2,"method","post");
+      dom.setAttribute(el2,"novalidate","novalidate");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("div");
+      dom.setAttribute(el3,"class","email-wrap");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("span");
+      dom.setAttribute(el4,"class","input-icon icon-mail");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("div");
+      dom.setAttribute(el3,"class","password-wrap");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("span");
+      dom.setAttribute(el4,"class","input-icon icon-lock");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("button");
+      dom.setAttribute(el3,"class","btn btn-blue");
+      dom.setAttribute(el3,"type","submit");
+      var el4 = dom.createTextNode("Log in");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("section");
+      dom.setAttribute(el3,"class","meta");
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, element = hooks.element, get = hooks.get, inline = hooks.inline, block = hooks.block;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element0 = dom.childAt(fragment, [0, 1]);
+      var element1 = dom.childAt(element0, [5]);
+      var morph0 = dom.createMorphAt(dom.childAt(element0, [1, 1]),0,1);
+      var morph1 = dom.createMorphAt(dom.childAt(element0, [3, 1]),0,1);
+      var morph2 = dom.createMorphAt(dom.childAt(element0, [7]),0,1);
+      element(env, element0, context, "action", ["validateAndAuthenticate"], {"on": "submit"});
+      inline(env, morph0, context, "gh-trim-focus-input", [], {"class": "email", "type": "email", "placeholder": "Email Address", "name": "identification", "autocapitalize": "off", "autocorrect": "off", "value": get(env, context, "model.identification")});
+      inline(env, morph1, context, "input", [], {"class": "password", "type": "password", "placeholder": "Password", "name": "password", "value": get(env, context, "model.password")});
+      element(env, element1, context, "action", ["validateAndAuthenticate"], {});
+      element(env, element1, context, "bind-attr", [], {"disabled": get(env, context, "submitting")});
+      block(env, morph2, context, "link-to", ["forgotten"], {"class": "forgotten-password"}, child0, null);
+      return fragment;
+    }
+  };
+}())); });
+
+define('ghost/templates/signup', ['exports'], function(__exports__){ __exports__['default'] = Ember.HTMLBars.template((function() {
+  return {
+    isHTMLBars: true,
+    blockParams: 0,
+    cachedFragment: null,
+    hasRendered: false,
+    build: function build(dom) {
+      var el0 = dom.createDocumentFragment();
+      var el1 = dom.createElement("section");
+      dom.setAttribute(el1,"class","setup-box js-signup-box fade-in");
+      var el2 = dom.createTextNode("\n    ");
+      dom.appendChild(el1, el2);
+      var el2 = dom.createElement("div");
+      dom.setAttribute(el2,"class","vertical");
+      var el3 = dom.createTextNode("\n        ");
+      dom.appendChild(el2, el3);
+      var el3 = dom.createElement("form");
+      dom.setAttribute(el3,"id","signup");
+      dom.setAttribute(el3,"class","setup-form");
+      dom.setAttribute(el3,"method","post");
+      dom.setAttribute(el3,"novalidate","novalidate");
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("input");
+      dom.setAttribute(el4,"style","display:none;");
+      dom.setAttribute(el4,"type","text");
+      dom.setAttribute(el4,"name","fakeusernameremembered");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("input");
+      dom.setAttribute(el4,"style","display:none;");
+      dom.setAttribute(el4,"type","password");
+      dom.setAttribute(el4,"name","fakepasswordremembered");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("header");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("h1");
+      var el6 = dom.createTextNode("Welcome to Ghost");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("h2");
+      var el6 = dom.createTextNode("Create your account to start publishing");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","email");
+      var el6 = dom.createTextNode("Email Address");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("Used for important notifications");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","name");
+      var el6 = dom.createTextNode("Full Name");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("The name that you will sign your posts with");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("div");
+      dom.setAttribute(el4,"class","form-group");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("label");
+      dom.setAttribute(el5,"for","password");
+      var el6 = dom.createTextNode("Password");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("p");
+      var el6 = dom.createTextNode("Must be at least 8 characters");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n            ");
+      dom.appendChild(el3, el4);
+      var el4 = dom.createElement("footer");
+      var el5 = dom.createTextNode("\n                ");
+      dom.appendChild(el4, el5);
+      var el5 = dom.createElement("button");
+      dom.setAttribute(el5,"type","submit");
+      dom.setAttribute(el5,"class","btn btn-green btn-lg");
+      var el6 = dom.createTextNode("Create Account");
+      dom.appendChild(el5, el6);
+      dom.appendChild(el4, el5);
+      var el5 = dom.createTextNode("\n            ");
+      dom.appendChild(el4, el5);
+      dom.appendChild(el3, el4);
+      var el4 = dom.createTextNode("\n        ");
+      dom.appendChild(el3, el4);
+      dom.appendChild(el2, el3);
+      var el3 = dom.createTextNode("\n    ");
+      dom.appendChild(el2, el3);
+      dom.appendChild(el1, el2);
+      var el2 = dom.createTextNode("\n");
+      dom.appendChild(el1, el2);
+      dom.appendChild(el0, el1);
+      var el1 = dom.createTextNode("\n");
+      dom.appendChild(el0, el1);
+      return el0;
+    },
+    render: function render(context, env, contextualElement) {
+      var dom = env.dom;
+      var hooks = env.hooks, get = hooks.get, inline = hooks.inline, element = hooks.element;
+      dom.detectNamespace(contextualElement);
+      var fragment;
+      if (env.useFragmentCache && dom.canClone) {
+        if (this.cachedFragment === null) {
+          fragment = this.build(dom);
+          if (this.hasRendered) {
+            this.cachedFragment = fragment;
+          } else {
+            this.hasRendered = true;
+          }
+        }
+        if (this.cachedFragment) {
+          fragment = dom.cloneNode(this.cachedFragment, true);
+        }
+      } else {
+        fragment = this.build(dom);
+      }
+      var element0 = dom.childAt(fragment, [0, 1, 1]);
+      var element1 = dom.childAt(element0, [13, 1]);
+      var morph0 = dom.createMorphAt(dom.childAt(element0, [7]),2,3);
+      var morph1 = dom.createMorphAt(dom.childAt(element0, [9]),2,3);
+      var morph2 = dom.createMorphAt(dom.childAt(element0, [11]),2,3);
+      inline(env, morph0, context, "input", [], {"type": "email", "name": "email", "autocorrect": "off", "value": get(env, context, "model.email")});
+      inline(env, morph1, context, "gh-trim-focus-input", [], {"type": "text", "name": "name", "autofocus": "autofocus", "autocorrect": "off", "value": get(env, context, "model.name")});
+      inline(env, morph2, context, "input", [], {"type": "password", "name": "password", "autofocus": "autofocus", "autocorrect": "off", "value": get(env, context, "model.password")});
+      element(env, element1, context, "action", ["signup"], {});
+      element(env, element1, context, "bind-attr", [], {"disabled": get(env, context, "submitting")});
+      return fragment;
+    }
+  };
+}())); });
 // Loader to create the Ember.js application
 /*global require */
 
 if (!window.disableBoot) {
-    window.App = require('ghost/app')['default'].create();
+    window.App = require('ghost/app').default.create();
 }
 
 //# sourceMappingURL=ghost.js.map
