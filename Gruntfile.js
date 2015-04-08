@@ -127,8 +127,8 @@ var _              = require('lodash'),
                 },
                 livereload: {
                     files: [
-                        'content/themes/casper/assets/css/*.css',
-                        'content/themes/casper/assets/js/*.js',
+                        'content/themes/**/assets/css/*.css',
+                        'content/themes/**/assets/js/*.js',
                         'core/client/assets/css/*.css',
                         'core/built/scripts/*.js'
                     ],
