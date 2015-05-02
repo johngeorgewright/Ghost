@@ -204,6 +204,11 @@ describe('Frontend Controller', function () {
                             'tag.hbs': '/content/themes/casper/tag.hbs'
                         }
                     }
+                },
+                routeKeywords: {
+                    page: 'page',
+                    tag: 'tag',
+                    author: 'author'
                 }
             });
         });
@@ -257,6 +262,11 @@ describe('Frontend Controller', function () {
                             'tag.hbs': '/content/themes/casper/tag.hbs'
                         }
                     }
+                },
+                routeKeywords: {
+                    page: 'page',
+                    tag: 'tag',
+                    author: 'author'
                 }
             });
 
@@ -301,8 +311,7 @@ describe('Frontend Controller', function () {
                 published_at: new Date('2014/1/2').getTime(),
                 author: {
                     id: 1,
-                    name: 'Test User',
-                    email: 'test@ghost.org'
+                    name: 'Test User'
                 }
             }],
             mockTags = [{
@@ -359,6 +368,11 @@ describe('Frontend Controller', function () {
                             'tag.hbs': '/content/themes/casper/tag.hbs'
                         }
                     }
+                },
+                routeKeywords: {
+                    page: 'page',
+                    tag: 'tag',
+                    author: 'author'
                 }
             });
         });
@@ -386,7 +400,6 @@ describe('Frontend Controller', function () {
                         render: function (view, context) {
                             view.should.equal('tag');
                             context.tag.should.equal(mockTags[0]);
-                            should.not.exist(context.posts[0].author.email);
                             done();
                         }
                     };
@@ -450,7 +463,8 @@ describe('Frontend Controller', function () {
 
         it('Redirects to base tag page if page number is 0 with subdirectory', function () {
             frontend.__set__('config', {
-                paths: {subdir: '/blog'}
+                paths: {subdir: '/blog'},
+                routeKeywords: {tag: 'tag'}
             });
 
             var req = {params: {page: 0, slug: 'pumpkin'}};
@@ -464,7 +478,8 @@ describe('Frontend Controller', function () {
 
         it('Redirects to base tag page if page number is 1 with subdirectory', function () {
             frontend.__set__('config', {
-                paths: {subdir: '/blog'}
+                paths: {subdir: '/blog'},
+                routeKeywords: {tag: 'tag'}
             });
 
             var req = {params: {page: 1, slug: 'pumpkin'}};
@@ -489,7 +504,8 @@ describe('Frontend Controller', function () {
 
         it('Redirects to last page if page number too big with subdirectory', function (done) {
             frontend.__set__('config', {
-                paths: {subdir: '/blog'}
+                paths: {subdir: '/blog'},
+                routeKeywords: {tag: 'tag'}
             });
 
             var req = {params: {page: 4, slug: 'pumpkin'}};
@@ -583,6 +599,11 @@ describe('Frontend Controller', function () {
                             'post.hbs': '/content/themes/casper/post.hbs'
                         }
                     }
+                },
+                routeKeywords: {
+                    page: 'page',
+                    tag: 'tag',
+                    author: 'author'
                 }
             });
         });
@@ -610,7 +631,6 @@ describe('Frontend Controller', function () {
                             render: function (view, context) {
                                 view.should.equal('page-' + mockPosts[2].posts[0].slug);
                                 context.post.should.equal(mockPosts[2].posts[0]);
-                                should.not.exist(context.post.author.email);
                                 done();
                             }
                         };
@@ -640,7 +660,6 @@ describe('Frontend Controller', function () {
                             render: function (view, context) {
                                 view.should.equal('page');
                                 context.post.should.equal(mockPosts[0].posts[0]);
-                                should.not.exist(context.post.author.email);
                                 done();
                             }
                         };
@@ -833,7 +852,6 @@ describe('Frontend Controller', function () {
                                 view.should.equal('post');
                                 context.post.should.exist;
                                 context.post.should.equal(mockPosts[1].posts[0]);
-                                should.not.exist(context.post.author.email);
                                 done();
                             }
                         };
@@ -948,7 +966,6 @@ describe('Frontend Controller', function () {
                                 view.should.equal('post');
                                 context.post.should.exist;
                                 context.post.should.equal(mockPosts[1].posts[0]);
-                                should.not.exist(context.post.author.email);
                                 done();
                             }
                         };
@@ -1079,7 +1096,6 @@ describe('Frontend Controller', function () {
                                 view.should.equal('post');
                                 should.exist(context.post);
                                 context.post.should.equal(mockPosts[1].posts[0]);
-                                should.not.exist(context.post.author.email);
                                 done();
                             }
                         };
@@ -1211,7 +1227,6 @@ describe('Frontend Controller', function () {
                                 view.should.equal('post');
                                 should.exist(context.post);
                                 context.post.should.equal(mockPosts[1].posts[0]);
-                                should.not.exist(context.post.author.email);
                                 done();
                             }
                         };
